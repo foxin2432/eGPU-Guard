@@ -92,14 +92,23 @@ $userPrincipal = New-ScheduledTaskPrincipal -UserId $who -LogonType Interactive 
 # ------------------------------------------------------------------ triggers ---
 $notifyTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $Days -At $NotifyTime
 $disableTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $Days -At $DisableTime
-# Enable as early as possible: the watcher gets its own startup trigger so the GPU is
-# brought up while Windows is still on the lock screen, instead of after logon.
+# Enable as early as possible: the watcher gets its own startup trigger so the GPU is brought
+# up while Windows is still on the lock screen, instead of after logon.
+#
+# On the Delay values, measured on the reference machine: a Delay of PT10S produced an actual
+# start 23 s after the boot timestamp, because the Delay is counted from when the boot trigger
+# FIRES (about 13 s into boot, once the scheduler is ready), not from the boot itself. That
+# first ~13 s is not ours to control; the Delay is, so it is kept small.
+#
+# Starting early is safe: the watcher never removes a device node, and Disconnected/Unknown/
+# Problem are all treated as "wait", so an early start simply observes the tunnel training and
+# enables the device the moment it is usable. PT3S keeps a little slack for the PnP service.
 $bootTrigger = New-ScheduledTaskTrigger -AtStartup
-$bootTrigger.Delay = 'PT20S'
+$bootTrigger.Delay = 'PT10S'
 $watchBootTrigger = New-ScheduledTaskTrigger -AtStartup
-$watchBootTrigger.Delay = 'PT10S'
+$watchBootTrigger.Delay = 'PT3S'
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn
-$logonTrigger.Delay = 'PT5S'
+$logonTrigger.Delay = 'PT3S'
 
 # ------------------------------------------------------------------- actions ---
 $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -126,10 +135,16 @@ $notifyAction = New-ScheduledTaskAction -Execute $psExe `
 # would only add an expected E_ACCESSDENIED line to the log.
 $disableAction = New-GuardAction @('-Action', 'Disable', '-Force', '-StayDown')
 $enableAction = New-GuardAction @('-Action', 'Enable')
-# The watcher task is always registered (it is what makes the GPU come up during boot);
-# -NoWatcherProcess only changes whether its resident loop keeps polling after startup.
+# The watcher task is always registered (it is what makes the GPU come up during boot).
+#
+# -StopWhenRunning makes it a boot-time helper rather than a permanent resident: it exits as
+# soon as the GPU is up. Once the device runs there is nothing left for it to do - the 23:55
+# task performs the scheduled disconnect - and a resident process would only keep spawning
+# pnputil (measured ~72 s of CPU per day, plus a process creation per tick) for no benefit.
+# -IdleExitMinutes bounds it further, so a dock that never appears cannot leave it resident.
+# -NoWatcherProcess replaces all of that with a single evaluation tick (diagnostics only).
 $watchArgs = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $watchScript
-if ($NoWatcherProcess) { $watchArgs += ' -Once' }
+if ($NoWatcherProcess) { $watchArgs += ' -Once' } else { $watchArgs += ' -StopWhenRunning' }
 $watchAction = New-ScheduledTaskAction -Execute $psExe -Argument $watchArgs
 
 function Register-GuardTask {

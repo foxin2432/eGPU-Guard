@@ -23,11 +23,9 @@ automatically afterwards — without having to remember to do either.
 * **23:50** — a desktop toast warns you to save your work.
 * **23:55** — the eGPU is disabled cleanly (`pnputil /disable-device`), and the desktop moves
   to the integrated GPU.
-* **On every boot** — if the eGPU is present but not started, it is enabled automatically, as
-  early as Windows allows.
-* **Continuously** — a resident watcher re-checks the device and brings it back if it drops
-  out, with an escalating backoff so a device that becomes usable shortly after is picked up
-  promptly.
+* **On every boot** — the eGPU is enabled automatically as early as Windows allows, and the
+  watcher **exits as soon as it is running**. There is no permanent background process: once
+  the GPU is up there is nothing left to do.
 
 Every part of it can be turned off or retimed. It is a scheduler around `pnputil`, nothing
 more.
@@ -141,7 +139,7 @@ Three scripts, four tasks.
 | Script | Role |
 |---|---|
 | `eGPU-Guard.ps1` | All actions. Runs and exits. |
-| `eGPU-Watch.ps1` | Resident watcher. Enables the device when it drops out. |
+| `eGPU-Watch.ps1` | Boot-time helper: enables the device, then exits. |
 | `eGPU-Notify.ps1` | The 23:50 toast. |
 
 | Task | Trigger | Principal |
@@ -217,6 +215,8 @@ deliberately dependency-free — update it there too, or set the installer's def
 | `-AbsentScanSeconds` | 300 | Rescan interval once fully idle |
 | `-BackoffSeconds` | 5,10,20,30,60 | Escalating delay after a failed enable |
 | `-TransientGraceSeconds` | 45 | How long to wait before logging that a dock power cycle is needed |
+| `-StopWhenRunning` | on | Exit as soon as the GPU is up instead of staying resident |
+| `-IdleExitMinutes` | 30 | Hard cap on how long it stays resident if the GPU never appears |
 
 The installer passes none of these, so edit the defaults or change the task arguments.
 
@@ -289,9 +289,8 @@ into these files has broken parsing before.
 
 * **23:50** — 桌面弹窗提醒你保存工作。
 * **23:55** — 用 `pnputil /disable-device` 干净地禁用外接显卡，桌面自动回到核显。
-* **每次开机** — 显卡已接上但未启动时，尽早自动启用。
-* **持续监控** — 常驻看门狗定期检查，显卡掉线就把它拉回来；重试间隔递进，显卡一可用就能
-  立刻被接上。
+* **每次开机** — 显卡已接上但未启动时，Windows 一允许就自动启用；**显卡起来后看门狗立即
+  退出**，不留下常驻进程——显卡正常运行后它已无事可做。
 
 所有时间点都可通过参数修改，也可以随时关掉。它本质上是 `pnputil` 外面套了一层调度。
 
@@ -402,7 +401,7 @@ cd eGPU-Guard
 | 脚本 | 职责 |
 |---|---|
 | `eGPU-Guard.ps1` | 全部动作，执行完即退出 |
-| `eGPU-Watch.ps1` | 常驻看门狗，显卡掉线时启用它 |
+| `eGPU-Watch.ps1` | 开机时的辅助进程：把显卡启用后即退出 |
 | `eGPU-Notify.ps1` | 23:50 的提醒弹窗 |
 
 | 任务 | 触发器 | 身份 |
@@ -473,6 +472,8 @@ pnputil /enum-devices /class Display
 | `-AbsentScanSeconds` | 300 | 完全空闲后的重扫描间隔 |
 | `-BackoffSeconds` | 5,10,20,30,60 | 启用失败后的递进延迟 |
 | `-TransientGraceSeconds` | 45 | 等待多久后提示需要物理断电重启扩展坞 |
+| `-StopWhenRunning` | on | 显卡启动成功后立即退出，不做常驻进程 |
+| `-IdleExitMinutes` | 30 | 硬性上限：等不到显卡时最多驻留多少分钟 |
 
 安装脚本不传这些参数，所以要么改默认值，要么改任务的参数。
 

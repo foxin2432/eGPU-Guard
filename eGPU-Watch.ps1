@@ -46,7 +46,19 @@ param(
 
     [string]$LogFile = (Join-Path $env:ProgramData 'eGPU-Guard\eGPU-Guard.log'),
     [switch]$Once,                      # evaluate one tick and exit (testing)
-    [switch]$SimulateAbsent             # behave as if no eGPU were attached (testing)
+    [switch]$SimulateAbsent,            # behave as if no eGPU were attached (testing)
+
+    # Exit as soon as the device is up instead of staying resident forever.
+    #
+    # Once the GPU is Started this process has nothing left to do: the 23:55 task performs the
+    # scheduled disconnect, and `-Action Enable` is available by hand. Staying resident only
+    # costs a pnputil spawn per tick (measured: 0.083 % of a core, ~72 s of CPU per day, plus
+    # process churn). Default ON, because idle cost with no benefit is wasted cost.
+    [switch]$StopWhenRunning,
+
+    # Hard upper bound on the wait, so a dock that never appears (or a device stuck in a
+    # Problem state, which no software action fixes) cannot leave a process resident forever.
+    [int]$IdleExitMinutes = 30
 )
 
 $ErrorActionPreference = 'Continue'
@@ -192,9 +204,11 @@ function Get-RecoveryPlan {
         'Disconnected' { return @{ Action = 'Wait'; Cadence = 3; Reason = 'tunnel still coming up' } }
         'Unknown'      { return @{ Action = 'Wait'; Cadence = 3; Reason = 'state not readable yet' } }
 
-        # Not repairable in software. Wait indefinitely (bounded by the backoff) and leave the
-        # node alone; a physical dock power cycle is the fix.
-        'Problem' { return @{ Action = 'Wait'; Cadence = 10; Reason = "problem $($State.ProblemCode) - needs a dock power cycle" } }
+        # Not repairable in software. Wait (bounded by the hard deadline) and leave the node
+        # alone; a physical dock power cycle is the fix. Polled tighter than a minute because
+        # this state is very often transient at boot: on the reference machine "Problem 18"
+        # appeared 23 s after boot and had cleared to Started by 54 s, entirely on its own.
+        'Problem' { return @{ Action = 'Wait'; Cadence = 5; Reason = "problem $($State.ProblemCode) - needs a dock power cycle" } }
 
         default { return @{ Action = 'Wait'; Cadence = 10; Reason = "status $($State.Status) - nothing to do" } }
     }
@@ -315,6 +329,14 @@ try {
 
         # A deliberate stop outranks this watcher's whole purpose. Checked before the (more
         # expensive) device lookup so a stay-down window costs one file test per tick.
+        # Hard deadline. Bounds the process lifetime when the dock never shows up, or when the
+        # device sits in a Problem state that no software action can clear - otherwise the
+        # process would stay resident forever waiting for something that is not coming.
+        if (($now - $startedAt).TotalMinutes -ge $IdleExitMinutes) {
+            Write-Log "nothing to do after $IdleExitMinutes min - exiting (a reboot or the Boot-Enable task will try again)"
+            exit 0
+        }
+
         if (Test-StayDown) {
             if (-not $stayDownLogged) {
                 Write-Log 'stay-down window is open (the eGPU was deliberately stopped) - not re-enabling'
@@ -382,6 +404,13 @@ try {
         if ($plan.Action -eq 'None') {
             $failStreak = 0
             $transientSince = $null
+            # The whole job is done. This is the normal path at boot: the GPU came up, so stop
+            # here rather than spawning pnputil every few seconds for the rest of the session.
+            if ($StopWhenRunning) {
+                $secs = [int]($now - $startedAt).TotalSeconds
+                Write-Log "eGPU is running after ${secs}s - exiting (nothing left to do)"
+                exit 0
+            }
             if ($Once) { exit 0 }
             Start-Sleep -Seconds $IntervalSeconds
             continue

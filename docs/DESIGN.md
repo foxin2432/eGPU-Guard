@@ -197,3 +197,57 @@ The device can pass through `Unknown` and `Disconnected` while the tunnel trains
 `pnputil` may briefly disagree with the registry. The watcher therefore treats
 `Disconnected`/`Unknown` as *wait*, clears the failure streak on any genuine state change, and
 never re-fires an action for the same `(state, attempt)` pair.
+
+## 13. Exit when there is nothing left to do
+
+**Rule:** the watcher is installed with `-StopWhenRunning`: it exits as soon as the device is
+`Started`. `-IdleExitMinutes` (default 30) bounds it further, so a dock that never appears
+cannot leave a process resident.
+
+**Why:** measured steady state on the reference machine with the GPU present:
+
+| Metric | Value |
+|---|---|
+| CPU | 0.083 % of one core (≈ 72 s per day) |
+| Memory | 27.8 MB |
+| Poll rate | ≈ 1.5 `pnputil` spawns per minute |
+
+Small, but it buys nothing. Once the GPU runs, the watcher's only remaining job would be
+noticing a drop-out — and the scheduled `23:55` task already handles the routine stop while
+`-Action Enable` covers the manual case. A process that spawns a child every 40 s forever, for
+no benefit, is waste.
+
+Two measurement traps found while establishing that baseline, both worth remembering:
+
+* **A short sample makes the percentage meaningless.** A watcher 0.1 min old reported 82.8 %
+  CPU; measured over a 75 s window the same process reported 0.083 %.
+* **Do not identify the watcher by its command line.** It runs as `SYSTEM`, and a non-elevated
+  `Get-CimInstance` cannot read a `SYSTEM` process's `CommandLine`, so a filter like
+  `CommandLine -match 'eGPU-Watch'` matches nothing and reports "no watcher running" while it
+  is running perfectly. Identify it by *who holds the lock file* — that is authoritative, and
+  it is exactly the invariant the lock exists to provide.
+
+## 14. What the remaining boot delay actually is
+
+On the reference machine, a boot with the dock attached looks like this:
+
+```
+15:32:20  boot
+15:32:43  watcher starts (23 s in) and sees "Problem 18"
+15:32:54  enable attempt: device not yet in the device tree
+15:33:14  Started - resolved on its own
+```
+
+Two separate components:
+
+* **~13 s of Windows.** A boot trigger fires only once Task Scheduler is ready, roughly 13 s
+  into boot. No `Delay` setting can move that, because the `Delay` is counted from the moment
+  the trigger fires, not from boot. This is why a `PT10S` delay produced a start 23 s in.
+  The delay is now `PT3S`, which is the only part that was ours to change.
+* **~31 s of driver/tunnel initialisation**, during which the device reports a `Problem` state
+  and then fixes itself. This is not software-addressable: the watcher deliberately does not
+  remove the node (rule 2), and an unproven "fix" here is exactly the class of change that
+  caused the failure in rule 2 in the first place.
+
+So the honest summary is that the reachable floor is set by the hardware and the OS, and the
+part that was ours has been reduced to a 3 s delay plus a 5 s detection cadence.

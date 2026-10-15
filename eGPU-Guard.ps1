@@ -470,10 +470,6 @@ function Invoke-Enable {
         Write-Log 'device reports Disconnected - the USB4 tunnel is down; power the dock and plug the cable' 'WARN'
         return 2
     }
-    if ($state.Status -eq 'Problem' -and $state.ProblemCode -eq 43) {
-        Write-Log 'device reports Problem 43 (failed post start) - a rescan cannot fix this; power-cycle the dock' 'ERROR'
-        return 4
-    }
     if (-not $state.Present -and -not $gpu.HasParams) {
         Write-Log 'device is not present and has no live driver node: nothing to enable (power the dock first)' 'ERROR'
         return 2
