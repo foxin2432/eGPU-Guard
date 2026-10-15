@@ -1,12 +1,14 @@
 # Nothing in this project is generated at build time - these are the things that show up
 # while working on a Windows box and should never be committed.
 
-# Local logs and captured output from test runs
+# Local logs and captured output from test runs.
+# Note: deliberately NOT a blanket "*.txt" - that silently swallows legitimate text files
+# added later, and the "!LICENSE" line it needed was a symptom of over-broad matching.
 *.log
-*.txt
-!LICENSE
+_local/
+_output/
 
-# Scratch / probe scripts used while debugging (kept out of the published tree on purpose)
+# Scratch / probe scripts used while debugging
 _*.ps1
 
 # Editor and OS noise
