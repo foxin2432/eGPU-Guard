@@ -1,0 +1,199 @@
+# Design notes
+
+Every rule here exists because an earlier version broke it. The failures are described
+concretely, because "don't do X" is much less convincing than "X cost us a boot and here is the
+log line".
+
+## 1. The hardware constraint that shapes everything
+
+The eGPU is reached over a USB4 port. The GPU sits behind a PCIe tunnel that has to be trained,
+and the dock in the reference setup has **no standby power** before its PSU is switched on
+(`ATX PS_ON`). Consequences:
+
+* During POST the host cannot see the dock. There is nothing to enumerate, so no B
+  firmware setting, no "auto start on boot" option and no hot-plug setting can help.
+* By the time the tunnel is up, firmware has finished. Software cannot make firmware wait
+  retroactively.
+* Therefore the only reliable arrangement is: dock PSU switch left **on**, tunnel trains during
+  POST, and software enables the device once Windows is ready.
+
+The physical press of the dock's power button cannot be removed in software. Everything below
+assumes that.
+
+## 2. Only ever enable, never remove a device node
+
+**Rule:** `eGPU-Watch.ps1` performs exactly one mutating operation, `pnputil /enable-device`.
+It has no `remove-device` path at all.
+
+**Why:** an earlier version treated a device that failed to start (`Problem 43`,
+`CM_PROB_FAILED_POST_START`) as "remove the node and let the bus re-enumerate it". If the USB4
+tunnel had not finished training, this deleted the node and the GPU then stayed missing for the
+rest of the boot. Observed 2026-10-15:
+
+```
+09:50:10 Watch state -> Unknown [PCI\VEN_10DE&DEV_2783&...]
+09:50:10 Watch action: remove + rescan [PCI\VEN_10DE&DEV_2783&...]
+09:50:18 Enable no 4070 SUPER in the device tree (dock off or not plugged)
+09:50:29 Watch eGPU not present - idling
+```
+
+The GPU did not come back until the dock was power-cycled.
+
+`enable-device` is safe and reversible. Removing a node is neither. A device that genuinely
+failed its own start cannot be fixed in software — only a dock power cycle or a cold boot
+clears it — so waiting is both cheaper and strictly safer.
+
+The `Restart` action still exists in `eGPU-Guard.ps1`, but it is manual-only: a human decides
+when it is warranted. The watcher refuses it and logs:
+
+```
+refusing unsupported action 'Restart' - the watcher only enables
+```
+
+## 3. A deliberate stop must be distinguishable from a fault
+
+**Rule:** `-StayDown` writes a marker that records the **boot time** it was created in. The
+watcher skips all recovery while the marker is valid, and treats it as stale once the boot time
+differs.
+
+**Why:** the watcher's whole purpose is "not started → start it", which is the exact opposite
+of what the nightly disconnect wants. The two fought each other and the disconnect lost:
+
+```
+23:55:00 Disable ... Device disabled successfully
+23:55:02 Watch state -> Disabled
+23:55:02 Watch action: enable
+23:55:05 Watch state -> Started          # the disconnect lasted 3 seconds
+```
+
+Keying the marker to the boot time, rather than to a wall-clock window, means:
+
+* it expires by itself on the next boot, so a fresh start brings the GPU up as usual;
+* a **manual** `Disable` (without `-StayDown`) does not write a marker at all, so unplugging and
+  replugging the dock still gets the GPU back automatically;
+* `-Action Resume` clears it early, without a reboot.
+
+A fixed time window (for example "23:55–00:00") was considered and rejected: it cannot express
+"until the machine comes back", and it would leave the GPU dark for an unpredictable part of
+the following day.
+
+## 4. Retries escalate instead of taking one long nap
+
+**Rule:** `-BackoffSeconds 5,10,20,30,60`.
+
+**Why:** the previous flat `ProblemBackoffSeconds = 600` applied after the **first** failure.
+The log shows what that cost:
+
+```
+15:45:16 Watch state -> Problem (problem 18)
+15:45:25 Enable no 4070 SUPER in the device tree
+15:45:30 Watch giving up after 1 attempts - waiting for a change
+15:55:34 Watch state -> Started          # 9m41s later
+```
+
+The GPU had become usable long before the watcher looked again. "Connecting after boot feels
+slow" was this, not the task start delay. Escalating backoff keeps the cost of a persistent
+fault bounded while picking up a device that arrives shortly after within seconds.
+
+## 5. Single instance via an exclusive file handle
+
+**Rule:** the watcher holds `[IO.File]::Open($lock, 'OpenOrCreate', 'ReadWrite', 'None')` for
+its whole lifetime.
+
+**Why:** the first implementation wrote its PID into a file and checked whether that PID was
+alive. PIDs are reused. After the original watcher died, its PID was taken by an unrelated
+process, the new watcher concluded "another instance is running" and exited — permanently
+disabling the only mechanism that brings the GPU back.
+
+An exclusive handle is released by the kernel on process death, so it cannot go stale. The
+lock files live in a `state\` subdirectory with a permissive ACL, so a non-elevated diagnostic
+run can inspect them.
+
+## 6. No child processes
+
+**Rule:** every action is a single in-process `pnputil` invocation. The watcher never spawns
+`powershell.exe`.
+
+**Why:** spawning a process per attempt is what made boot feel heavy while the device sat in a
+retry loop. Measured cost of the primitives used instead:
+
+| Operation | Cost |
+|---|---|
+| `pnputil /enum-devices` | ≈ 69 ms |
+| Enumerating `Enum\PCI` in the registry | ≈ 5 ms |
+| Wildcard `Get-Item` on the device key | ≈ 2 ms |
+| Reading `ConfigFlags` | ≈ 2 ms |
+
+## 7. Absence must be free
+
+**Rule:** with no eGPU attached, the watcher does one registry lookup per tick and nothing else.
+
+**Why:** on a machine without the dock the tool must be indistinguishable from not being
+installed. Measured over 15 s with no device: **0 ms of CPU, 0 child processes**, and exactly
+three log lines at startup followed by silence.
+
+## 8. Locale-independent `pnputil` parsing
+
+**Rule:** parse only status **values** and numeric problem codes; labels are unreliable.
+
+**Why:** `pnputil` localises its labels. Interactively it prints `Status:`; when its output is
+redirected or hidden (as under Task Scheduler) it prints `状态:`. Only the values — `Started`,
+`Disabled`, `Problem`, and so on — are stable, and even those are localised, so the parser
+matches against a code-point table built at runtime.
+
+Related traps that cost real debugging time:
+
+* `pnputil` exits **0 even when it fails**. The failure is only visible in its text
+  (`Failed to ...`, localised to `无法...` / `拒绝访问`). Always verify by reading `ConfigFlags`
+  or the status back.
+* `Problem Code: 43 (0x2B) [CM_PROB_FAILED_POST_START]` carries the numeric code in
+  parentheses; the symbolic name is dropped entirely on a localised system.
+
+## 9. The scripts are pure ASCII
+
+**Rule:** CI fails if any `.ps1` contains a non-ASCII byte.
+
+**Why:** localized strings were originally written literally into the files. The encoding
+round-trip corrupted them — mojibake consumed a closing quote and produced unterminated
+strings and syntax errors. Localized text is now assembled from `[char]` code points, and the
+rule is enforced mechanically rather than by discipline.
+
+## 10. Safety guards, and which ones may be waived
+
+**Rule:** `-Force` waives only the "an external display is attached" warning. The "this is the
+only active display adapter" guard is **never** waivable.
+
+**Why:** the two risks are not comparable. Blanking an external monitor is an inconvenience;
+disabling the only display adapter leaves the machine with no output at all, which is exactly
+the situation this tool must never create. The nightly task passes `-Force` (the monitor is
+normally attached at 23:55) and cannot pass anything that defeats the second check.
+
+This is also why the missing `-Force` on the nightly task was a silent failure rather than a
+loud one — worth knowing when diagnosing:
+
+```
+23:55:00 Disable start
+23:55:01 WARN an external display looks attached
+23:55:01 ERROR refusing without -Force
+23:55:01 Disable end (exit=5)
+```
+
+## 11. Task principal and elevation
+
+**Rule:** the tasks that must run without a logged-in user are registered with
+`-Principal SYSTEM -LogonType ServiceAccount`, which **requires** an elevated shell.
+
+**Why:** registering a `SYSTEM` principal without administrator rights fails with "Access is
+denied", and a non-elevated `Get-ScheduledTask` cannot even read `SYSTEM` tasks back — so
+verification of the installed arguments must also be elevated.
+
+Related: a toast can only be shown by an interactive caller. The nightly task runs as `SYSTEM`
+in session 0, where the toast API fails with `E_ACCESSDENIED`. That is expected, so the task
+does not pass `-Toast` and the failure is logged at INFO rather than WARN.
+
+## 12. Monotonic state is not assumed
+
+The device can pass through `Unknown` and `Disconnected` while the tunnel trains, and
+`pnputil` may briefly disagree with the registry. The watcher therefore treats
+`Disconnected`/`Unknown` as *wait*, clears the failure streak on any genuine state change, and
+never re-fires an action for the same `(state, attempt)` pair.

@@ -1,0 +1,22 @@
+# Nothing in this project is generated at build time - these are the things that show up
+# while working on a Windows box and should never be committed.
+
+# Local logs and captured output from test runs
+*.log
+*.txt
+!LICENSE
+
+# Scratch / probe scripts used while debugging (kept out of the published tree on purpose)
+_*.ps1
+
+# Editor and OS noise
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+desktop.ini
+
+# PowerShell module and profile artifacts
+*.ps1xml
+*.psc1
