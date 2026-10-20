@@ -231,30 +231,47 @@ function Get-AttachedMonitorOnEGpu {
 }
 
 function Show-Toast {
-    param([string]$Title, [string]$Body)
+    # Delegates to eGPU-Notify.ps1 so there is exactly ONE implementation of "show something
+    # to the user", and so it inherits that script's working window.
+    #
+    # This used to build a WinRT ToastNotification itself and call
+    # ToastNotificationManager.CreateToastNotifier(<AUMID>).Show(). That silently does nothing
+    # when the AUMID is not a registered Start Menu shortcut for the current user: Show()
+    # returns without an error, no toast appears, and the log claims success. Which is exactly
+    # what happened every night on the reference machine until 2026-10-20.
+    param([string]$Title, [string]$Body, [int]$Seconds = 5)
+    # $PSScriptRoot is empty in some hosting contexts, so fall back to $PSCommandPath before
+    # giving up. (This is the same trap the installer had to work around.)
+    $base = $PSScriptRoot
+    if (-not $base -and $PSCommandPath) { $base = Split-Path -Parent $PSCommandPath }
+    if (-not $base) { $base = Split-Path -Parent ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) }
+    $notifier = if ($base) { Join-Path $base 'eGPU-Notify.ps1' } else { $null }
+    if (-not (Test-Path -LiteralPath $notifier)) {
+        # Not a WARN: a window can only be shown by an interactive caller anyway, and when the
+        # scheduled task runs as SYSTEM (session 0) there is nothing to show it on. The log
+        # line records that it was attempted.
+        Write-Log 'no reminder window shown (eGPU-Notify.ps1 not found next to this script)'
+        return
+    }
     try {
-        $null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
-        $null = [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
-        $template = @"
-<toast duration="long">
-  <visual>
-    <binding template="ToastGeneric">
-      <text>$Title</text>
-      <text>$Body</text>
-    </binding>
-  </visual>
-</toast>
-"@
-        $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-        $xml.LoadXml($template)
-        $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
-        $appId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
-        [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast)
+        $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        # Build ONE argument string with explicit quoting. Passing -ArgumentList an array does
+        # NOT quote elements that contain spaces: "4070S is up." would arrive as three separate
+        # arguments, the notify script would fail to bind them, and - because it is started
+        # hidden - the failure would be completely silent. (Found exactly that way.)
+        #
+        # The quotes must be DOUBLE quotes. Windows command-line parsing strips double quotes;
+        # it does not strip single quotes, so -File 'D:\...ps1' would look for a file whose
+        # name literally begins with an apostrophe. Embedded double quotes are folded to
+        # apostrophes so they cannot break out of the quoting.
+        $q = { param($s) '"' + ($s -replace '"', "'") + '"' }
+        $argLine = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass ' +
+                   ('-File {0} -Title {1} -Body {2} -Seconds {3}' -f (& $q $notifier), (& $q $Title), (& $q $Body), $Seconds)
+        # Run it as a separate process on purpose: it needs an STA thread and a message loop,
+        # and it must not block the action that is reporting its result.
+        Start-Process -FilePath $ps -WindowStyle Hidden -ArgumentList $argLine | Out-Null
     } catch {
-        # Not a WARN: a toast can only be shown by an interactive caller. When the scheduled
-        # task runs as SYSTEM (session 0) this always fails with E_ACCESSDENIED, and that is
-        # expected - the log line is enough to see it was attempted.
-        Write-Log "toast not shown (only interactive callers can): $($_.Exception.Message)"
+        Write-Log "reminder window not shown: $($_.Exception.Message)"
     }
 }
 

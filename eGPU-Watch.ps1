@@ -158,6 +158,14 @@ function Get-LocalizedPnpMap {
             (& $c @(0x5931, 0x8D25))
             (& $c @(0x62D2, 0x7EDD, 0x8BBF, 0x95EE))
         )
+        # pnputil exits non-zero and prints a complaint when the requested end state is
+        # ALREADY in effect ("device is already enabled"). That is a successful no-op, not a
+        # failure, so it is checked before the failure verdict is finalised.
+        Benign = @(
+            'already enabled'
+            'already started'
+            (& $c @(0x5DF2, 0x542F, 0x7528))
+        )
     }
     $script:LocalizedPnpMap
 }
@@ -225,6 +233,13 @@ function Invoke-Pnp {
     if (-not $failure) {
         foreach ($token in (Get-LocalizedPnpMap).Failure) { if ($text.Contains($token)) { $failure = $true; break } }
     }
+    # "already in the requested state" wins over the failure verdict: pnputil reports it on
+    # stderr with a non-zero exit code, but the end state is exactly what was asked for.
+    if ($failure) {
+        foreach ($token in (Get-LocalizedPnpMap).Benign) {
+            if ($text.IndexOf($token, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $failure = $false; break }
+        }
+    }
     $ok = ((($null -eq $code) -or ($code -eq 0)) -and (-not $failure))
     [pscustomobject]@{ Ok = $ok; Text = ($text -replace "`r?`n", ' | ').Trim() }
 }
@@ -266,6 +281,20 @@ function Invoke-Recovery {
     try {
         switch ($PlanAction) {
             'Enable' {
+                # Re-read the state now that the lock is held, and act only on what is true
+                # now. The plan was built from a state read taken BEFORE waiting for the lock,
+                # and in that window the Boot-Enable task (or a manual -Action Enable) may
+                # already have brought the device up. Acting on the stale plan then issues a
+                # second /enable-device against a Started device, which pnputil rejects with
+                # "device is already enabled" - observed on 2026-10-20 at 13:27:59 as a
+                # WARN "Enable failed" immediately followed by "state -> Started", i.e. a
+                # scary-looking warning for a no-op. A state read is one pnputil call (~34 ms)
+                # and only happens on this path, so the cost is irrelevant.
+                $fresh = Get-EGpuState -InstanceId $InstanceId
+                if ($fresh.Status -eq 'Started') {
+                    Write-Log 'already started while waiting for the lock - nothing to do'
+                    return [pscustomobject]@{ Ok = $true; Text = 'already started' }
+                }
                 Write-Log "action: enable [$InstanceId]"
                 return Invoke-Pnp @('/enable-device', $InstanceId)
             }

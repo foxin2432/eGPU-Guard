@@ -1,21 +1,46 @@
 <#
-    eGPU-Notify.ps1  -  desktop toast reminder, run in the interactive user session.
+    eGPU-Notify.ps1  -  desktop reminder shown in the interactive user session.
 
-    Reads the companion eGPU-Guard.ps1 -Action Status output so the text matches reality.
-    Default text: 5 minute warning before the nightly disconnect.
+    WHY THIS DOES NOT USE A WINRT TOAST ANY MORE
+    --------------------------------------------
+    It used to build a ToastNotification and show it through
+    ToastNotificationManager.CreateToastNotifier(<AUMID>).Show(). On this machine that logged
+    "toast shown" every night at 23:50 and nothing ever appeared on screen - because Show()
+    returns success for an AUMID that is not registered as a Start Menu shortcut for the
+    current user, and Windows then drops the notification silently. No exception, no error
+    code, no way to detect it from the caller.
+
+    So the reminder is now a WPF window that this script draws itself. It needs nothing from
+    the notification stack: no AUMID, no registration, no Focus Assist cooperation. If the
+    process can show a window in the user's session, the reminder is visible. It is also
+    click-through-free, always on top, and positions itself in the bottom-right corner of the
+    working area, which is where a reminder is expected to be.
+
+    A sound is played when it appears. The window closes itself after -Seconds, or immediately
+    on click or Esc, so it can never be left behind on the desktop.
+
+    Runs under powershell.exe (STA). Reported exit codes: 0 shown, 1 failed.
 #>
 [CmdletBinding()]
 param(
     [string]$Title = 'eGPU Guard',
     [string]$Body = '23:55 will stop the RTX 4070 SUPER. Save your work / close games now.',
+    [string]$Hint = 'Click anywhere to dismiss - or leave it, it closes by itself.',
+
+    # How long the window stays up before closing itself. Short on purpose: the reminder is
+    # meant to be noticed, not to sit on the desktop. Raise it with -Seconds if you would
+    # rather it stayed longer.
+    [int]$Seconds = 5,
+
+    [switch]$NoSound,
     [string]$LogFile = "$env:ProgramData\eGPU-Guard\eGPU-Guard.log"
 )
 
 $ErrorActionPreference = 'Continue'
 
 function Write-Log {
-    param([string]$Message)
-    $line = '{0} [INFO] Notify {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message
+    param([string]$Level = 'INFO', [string]$Message)
+    $line = '{0} [{1}] Notify {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
     Write-Host $line
     try {
         $dir = Split-Path -Parent $LogFile
@@ -24,33 +49,124 @@ function Write-Log {
     } catch { }
 }
 
+function Start-ReminderSound {
+    # Prefer the system notification wav; fall back to the built-in Exclamation sound. Both are
+    # played asynchronously so a slow or missing audio device cannot delay the window.
+    # The player is kept in a script-scope variable on purpose: Play() is asynchronous and a
+    # collected SoundPlayer cuts the sound off mid-way.
+    $script:SoundPlayer = $null
+    try {
+        $wav = Join-Path $env:SystemRoot 'Media\Windows Notify System Generic.wav'
+        if (Test-Path -LiteralPath $wav) {
+            $script:SoundPlayer = New-Object System.Media.SoundPlayer $wav
+            $script:SoundPlayer.Play()
+            return 'wav'
+        }
+    } catch { }
+    try {
+        [System.Media.SystemSounds]::Exclamation.Play()
+        return 'system'
+    } catch { }
+    return 'none'
+}
+
+Write-Log -Message 'reminder starting'
+
+# A window can only appear in an interactive session. If this somehow runs in session 0
+# (SYSTEM), say so instead of pretending the user was reminded.
+if ($null -ne $env:SESSIONNAME -and $env:SESSIONNAME -eq 'Services') {
+    Write-Log -Level 'ERROR' -Message 'no interactive desktop (session 0) - a window cannot be shown here'
+    exit 1
+}
+
+if ($NoSound) {
+    Write-Log -Message 'sound disabled by -NoSound'
+} else {
+    $how = Start-ReminderSound
+    if ($how -eq 'none') { Write-Log -Level 'WARN' -Message 'could not play a sound' }
+    else { Write-Log -Message "sound played ($how)" }
+}
+
 try {
-    $null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
-    $null = [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
+    Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase -ErrorAction Stop
 
-    $template = @"
-<toast duration="long" scenario="reminder">
-  <visual>
-    <binding template="ToastGeneric">
-      <text>$Title</text>
-      <text>$Body</text>
-    </binding>
-  </visual>
-  <audio src="ms-winsoundevent:Notification.Reminder" />
-</toast>
-"@
+    $window = New-Object Windows.Window
+    $window.Title = $Title
+    $window.WindowStyle = 'None'
+    $window.ResizeMode = 'NoResize'
+    $window.AllowsTransparency = $true
+    $window.Background = [Windows.Media.Brushes]::Transparent
+    $window.ShowInTaskbar = $false
+    $window.Topmost = $true
+    $window.Width = 360
+    $window.SizeToContent = 'Height'
+    $window.WindowStartupLocation = 'Manual'
 
-    $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-    $xml.LoadXml($template)
-    $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
+    $border = New-Object Windows.Controls.Border
+    $border.CornerRadius = [Windows.CornerRadius]::new(10)
+    $border.BorderThickness = [Windows.Thickness]::new(1)
+    $border.BorderBrush = [Windows.Media.BrushConverter]::new().ConvertFromString('#40FFFFFF')
+    $border.Background = [Windows.Media.BrushConverter]::new().ConvertFromString('#F2202020')
+    $border.Padding = [Windows.Thickness]::new(16, 14, 16, 14)
+    $border.Margin = [Windows.Thickness]::new(10)
 
-    # AppId of Windows PowerShell: works without installing any extra module,
-    # the toast shows up as coming from PowerShell (acceptable for a reminder).
-    $appId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
-    [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast)
-    Write-Log "toast shown: $Body"
+    $stack = New-Object Windows.Controls.StackPanel
+
+    $t = New-Object Windows.Controls.TextBlock
+    $t.Text = $Title
+    $t.FontSize = 15
+    $t.FontWeight = [Windows.FontWeights]::SemiBold
+    $t.Foreground = [Windows.Media.Brushes]::White
+    $t.TextWrapping = 'Wrap'
+    $null = $stack.Children.Add($t)
+
+    $b = New-Object Windows.Controls.TextBlock
+    $b.Text = $Body
+    $b.FontSize = 12.5
+    $b.Margin = [Windows.Thickness]::new(0, 8, 0, 0)
+    $b.Foreground = [Windows.Media.BrushConverter]::new().ConvertFromString('#FFEDEDED')
+    $b.TextWrapping = 'Wrap'
+    $null = $stack.Children.Add($b)
+
+    $h = New-Object Windows.Controls.TextBlock
+    $h.Text = $Hint
+    $h.FontSize = 10.5
+    $h.Margin = [Windows.Thickness]::new(0, 10, 0, 0)
+    $h.Foreground = [Windows.Media.BrushConverter]::new().ConvertFromString('#FF9A9A9A')
+    $h.TextWrapping = 'Wrap'
+    $null = $stack.Children.Add($h)
+
+    $border.Child = $stack
+    $window.Content = $border
+
+    # Closing on click or Esc. Closing directly is enough: ShowDialog returns to this script.
+    $window.Add_MouseLeftButtonUp({ $window.Close() })
+    $window.Add_KeyDown({ if ($_.Key -eq 'Escape') { $window.Close() } })
+
+    $timer = New-Object Windows.Threading.DispatcherTimer
+    $timer.Interval = [TimeSpan]::FromSeconds([Math]::Max(3, $Seconds))
+    $timer.Add_Tick({ $timer.Stop(); $window.Close() })
+
+    # Position once the window has been measured: with SizeToContent the height is only known
+    # after layout, and using a guessed height would place it off the bottom edge.
+    $window.Add_Loaded({
+        $window.UpdateLayout()
+        $h_ = $window.ActualHeight
+        $w_ = $window.ActualWidth
+        $area = [Windows.SystemParameters]::WorkArea
+        $left = $area.Right - $w_ - 16
+        $top = $area.Bottom - $h_ - 16
+        if ($left -lt $area.Left) { $left = $area.Left }
+        if ($top -lt $area.Top) { $top = $area.Top }
+        $window.Left = $left
+        $window.Top = $top
+        $timer.Start()
+    })
+
+    $null = $window.ShowDialog()
+    Write-Log -Message "reminder shown and dismissed: $Body"
     exit 0
 } catch {
-    Write-Log "toast failed: $($_.Exception.Message)"
+    Write-Log -Level 'ERROR' -Message "could not show the reminder window: $($_.Exception.Message)"
     exit 1
 }

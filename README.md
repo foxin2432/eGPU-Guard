@@ -20,7 +20,8 @@ automatically afterwards — without having to remember to do either.
 
 `eGPU-Guard` registers a small set of Windows scheduled tasks that do exactly that:
 
-* **23:50** — a desktop toast warns you to save your work.
+* **23:50** — a reminder window appears in the bottom-right corner with a sound, and closes
+  itself after a few seconds.
 * **23:55** — the eGPU is disabled cleanly (`pnputil /disable-device`), and the desktop moves
   to the integrated GPU.
 * **On every boot** — the eGPU is enabled automatically as early as Windows allows, and the
@@ -98,7 +99,7 @@ Elevation is not optional: one task runs as `SYSTEM`, and Windows refuses to reg
 |---|---|
 | `-Force` | Waives the *external display is attached* warning. The *only active display adapter* guard is **never** waivable |
 | `-StayDown` | Keeps the device down until the next boot (this is what the nightly task uses) |
-| `-Toast` | Shows a desktop toast with the result |
+| `-Toast` | Shows the result in the bottom-right reminder window |
 | `-LogFile <path>` | Overrides the log location |
 
 ### Exit codes
@@ -140,7 +141,7 @@ Three scripts, four tasks.
 |---|---|
 | `eGPU-Guard.ps1` | All actions. Runs and exits. |
 | `eGPU-Watch.ps1` | Boot-time helper: enables the device, then exits. |
-| `eGPU-Notify.ps1` | The 23:50 toast. |
+| `eGPU-Notify.ps1` | The 23:50 reminder window. |
 
 | Task | Trigger | Principal |
 |---|---|---|
@@ -220,6 +221,9 @@ deliberately dependency-free — update it there too, or set the installer's def
 
 The installer passes none of these, so edit the defaults or change the task arguments.
 
+`eGPU-Notify.ps1` (the 23:50 reminder) takes `-Seconds` (how long the window stays up,
+default 5), `-NoSound`, and `-Title` / `-Body` for the text.
+
 ## Troubleshooting
 
 **The GPU does not come back after boot.**
@@ -287,7 +291,7 @@ into these files has broken parsing before.
 
 `eGPU-Guard` 注册几个 Windows 计划任务来完成：
 
-* **23:50** — 桌面弹窗提醒你保存工作。
+* **23:50** — 右下角弹出提醒窗口并播放提示音，几秒后自动关闭。
 * **23:55** — 用 `pnputil /disable-device` 干净地禁用外接显卡，桌面自动回到核显。
 * **每次开机** — 显卡已接上但未启动时，Windows 一允许就自动启用；**显卡起来后看门狗立即
   退出**，不留下常驻进程——显卡正常运行后它已无事可做。
@@ -362,7 +366,7 @@ cd eGPU-Guard
 |---|---|
 | `-Force` | 豁免"接着外接显示器"的警告。但"这是唯一的活动显示适配器"这道保护**永远不可豁免** |
 | `-StayDown` | 保持断开直到下次开机（夜间任务用的就是这个） |
-| `-Toast` | 用桌面弹窗显示结果 |
+| `-Toast` | 用右下角提醒窗口显示结果 |
 | `-LogFile <路径>` | 自定义日志路径 |
 
 ### 退出码
@@ -402,7 +406,7 @@ cd eGPU-Guard
 |---|---|
 | `eGPU-Guard.ps1` | 全部动作，执行完即退出 |
 | `eGPU-Watch.ps1` | 开机时的辅助进程：把显卡启用后即退出 |
-| `eGPU-Notify.ps1` | 23:50 的提醒弹窗 |
+| `eGPU-Notify.ps1` | 23:50 的提醒窗口（含提示音） |
 
 | 任务 | 触发器 | 身份 |
 |---|---|---|
@@ -476,6 +480,9 @@ pnputil /enum-devices /class Display
 | `-IdleExitMinutes` | 30 | 硬性上限：等不到显卡时最多驻留多少分钟 |
 
 安装脚本不传这些参数，所以要么改默认值，要么改任务的参数。
+
+`eGPU-Notify.ps1`（23:50 提醒）有 `-Seconds`（窗口停留秒数，默认 5）、`-NoSound`，以及
+`-Title` / `-Body` 用于自定义文字。
 
 ## 排查
 

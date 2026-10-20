@@ -92,23 +92,37 @@ $userPrincipal = New-ScheduledTaskPrincipal -UserId $who -LogonType Interactive 
 # ------------------------------------------------------------------ triggers ---
 $notifyTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $Days -At $NotifyTime
 $disableTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $Days -At $DisableTime
-# Enable as early as possible: the watcher gets its own startup trigger so the GPU is brought
-# up while Windows is still on the lock screen, instead of after logon.
+# Two tasks can bring the GPU up, and they must not race at boot.
+#
+# The WATCHER owns the job: it starts 3 s after the boot trigger fires, polls, retries with a
+# 5/10/20/30/60 s backoff, exits when the device is running and gives up after 30 min.
+# The single-shot Boot-Enable task is only a FALLBACK for the case where the watcher never
+# started at all, so it is deliberately delayed well past the point where the watcher would
+# have acted. Running both at boot meant two PowerShell processes and two pnputil calls for
+# the same device at the same moment, and the loser logged a spurious "Enable failed" after
+# the winner had already brought the device up (observed 2026-10-20 13:27:59).
 #
 # On the Delay values, measured on the reference machine: a Delay of PT10S produced an actual
 # start 23 s after the boot timestamp, because the Delay is counted from when the boot trigger
 # FIRES (about 13 s into boot, once the scheduler is ready), not from the boot itself. That
-# first ~13 s is not ours to control; the Delay is, so it is kept small.
+# first ~13 s is not ours to control; the Delay is, so the watcher's is kept small.
 #
 # Starting early is safe: the watcher never removes a device node, and Disconnected/Unknown/
 # Problem are all treated as "wait", so an early start simply observes the tunnel training and
 # enables the device the moment it is usable. PT3S keeps a little slack for the PnP service.
 $bootTrigger = New-ScheduledTaskTrigger -AtStartup
-$bootTrigger.Delay = 'PT10S'
+$bootTrigger.Delay = 'PT2M'
 $watchBootTrigger = New-ScheduledTaskTrigger -AtStartup
 $watchBootTrigger.Delay = 'PT3S'
+# The watcher gets its OWN logon trigger, kept quick: it is a second chance to catch a device
+# that the boot attempt missed, and it costs almost nothing when the eGPU is already running
+# (it sees Started and exits in well under a second). The fallback enable gets a late one, so
+# it cannot race the watcher. Sharing one trigger object between the two tasks is what made a
+# single change here silently slow the watcher down as well.
+$watchLogonTrigger = New-ScheduledTaskTrigger -AtLogOn
+$watchLogonTrigger.Delay = 'PT3S'
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn
-$logonTrigger.Delay = 'PT3S'
+$logonTrigger.Delay = 'PT2M'
 
 # ------------------------------------------------------------------- actions ---
 $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -189,7 +203,7 @@ Write-Host 'Registering scheduled tasks:'
 
 # Registered first on purpose: this is the piece that gets the GPU up during boot.
 $result += Register-GuardTask -TaskName "$prefix-Watch" -Action $watchAction `
-    -Trigger @($watchBootTrigger, $logonTrigger) -Principal $systemPrincipal -Settings $settWatch `
+    -Trigger @($watchBootTrigger, $watchLogonTrigger) -Principal $systemPrincipal -Settings $settWatch `
     -Description 'Resident watcher: enable the eGPU as soon as it appears (runs from startup)'
 
 $result += Register-GuardTask -TaskName "$prefix-Boot-Enable" -Action $enableAction `

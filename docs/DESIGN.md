@@ -251,3 +251,63 @@ Two separate components:
 
 So the honest summary is that the reachable floor is set by the hardware and the OS, and the
 part that was ours has been reduced to a 3 s delay plus a 5 s detection cadence.
+
+## 15. A toast that reports success and shows nothing
+
+The 23:50 reminder was a WinRT `ToastNotification` shown through
+`ToastNotificationManager.CreateToastNotifier(<AUMID>).Show()`. Every night the log said
+`toast shown`. Nothing ever appeared on screen.
+
+`Show()` returns normally for an AUMID that is not registered as a Start Menu shortcut for the
+current user, and Windows then drops the notification silently. There is no exception, no error
+code, and no way for the caller to tell the difference between "delivered" and "discarded".
+Focus Assist and the per-app notification toggle produce the same silence.
+
+**Rule:** the reminder is now a WPF window that the script draws itself, in the bottom-right
+corner of the working area, with a sound. It depends on nothing from the notification stack:
+no AUMID, no registration, no Focus Assist cooperation. If the process can show a window in
+the user's session, the reminder is visible, and that is a condition this code can actually
+check by being run at all.
+
+`eGPU-Guard.ps1 -Toast` delegates to the same script instead of keeping a second, equally
+silent copy of the toast code.
+
+Two adjacent traps, both hit while making this change:
+
+* **`Start-Process -ArgumentList` does not quote array elements.** A body of `4070S is up.`
+  arrives as three arguments; the child fails to bind them and — started hidden — fails in
+  complete silence. Pass one pre-quoted string instead.
+* **Those quotes must be double quotes.** Windows command-line parsing strips `"` but not `'`,
+  so `-File 'D:\...ps1'` looks for a file whose name literally starts with an apostrophe.
+  The single-quoted version runs fine interactively and fails from `Start-Process`, which is
+  the worst combination.
+
+## 16. Acting on a state that is no longer true
+
+The watcher reads the device state, decides to enable, and *then* waits for the action lock.
+Between those two points another actor — the single-shot `Boot-Enable` task, or a manual
+`-Action Enable` — can do the job first. The stale plan then issues a second
+`/enable-device` against a device that is already started:
+
+```
+13:27:58  Enable  pnputil /enable-device ... Device enabled successfully
+13:27:59  Watch   Enable failed: ... 设备已启用 (device is already enabled)
+13:28:03  Watch   state -> Started
+```
+
+A scary WARN for a no-op, produced by the two halves of the same system fighting over the same
+device. Two fixes, because either alone would leave a gap:
+
+1. **Re-read the state once the lock is held**, and skip if the device is already `Started`.
+   The plan is a guess; only the state under the lock is a fact. One extra `pnputil` call
+   (~34 ms) on a path that runs at most a couple of times per boot.
+2. **Treat "already in the requested state" as success.** `pnputil` exits non-zero and prints
+   a complaint when the end state already holds. That is an idempotent no-op, not a failure,
+   and the benign spelling is checked before the failure verdict is finalised.
+
+The single-shot `Boot-Enable` task was also demoted to a genuine fallback (`PT2M`) so the two
+cannot race at boot in the first place: the watcher starts 3 s after the boot trigger and owns
+the job, while the fallback only matters if the watcher never started at all.
+
+Verified by reproducing the race deliberately — disable the device, then start both actors
+together — which produced the dedup branch and no false warning.
