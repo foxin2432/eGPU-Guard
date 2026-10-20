@@ -21,7 +21,8 @@ automatically afterwards — without having to remember to do either.
 `eGPU-Guard` registers a small set of Windows scheduled tasks that do exactly that:
 
 * **23:50** — a reminder window appears in the bottom-right corner with a sound, and closes
-  itself after a few seconds.
+  itself after a few seconds. It is skipped when no eGPU is attached, because there would be
+  nothing to disconnect.
 * **23:55** — the eGPU is disabled cleanly (`pnputil /disable-device`), and the desktop moves
   to the integrated GPU.
 * **On every boot** — the eGPU is enabled automatically as early as Windows allows, and the
@@ -222,7 +223,8 @@ deliberately dependency-free — update it there too, or set the installer's def
 The installer passes none of these, so edit the defaults or change the task arguments.
 
 `eGPU-Notify.ps1` (the 23:50 reminder) takes `-Seconds` (how long the window stays up,
-default 5), `-NoSound`, and `-Title` / `-Body` for the text.
+default 5), `-NoSound`, `-Always` (show it even when no eGPU is attached), and `-Title` /
+`-Body` for the text.
 
 ## Troubleshooting
 
@@ -291,7 +293,8 @@ into these files has broken parsing before.
 
 `eGPU-Guard` 注册几个 Windows 计划任务来完成：
 
-* **23:50** — 右下角弹出提醒窗口并播放提示音，几秒后自动关闭。
+* **23:50** — 右下角弹出提醒窗口并播放提示音，几秒后自动关闭。**没接显卡时不弹**，因为
+  那时并没有东西需要断开。
 * **23:55** — 用 `pnputil /disable-device` 干净地禁用外接显卡，桌面自动回到核显。
 * **每次开机** — 显卡已接上但未启动时，Windows 一允许就自动启用；**显卡起来后看门狗立即
   退出**，不留下常驻进程——显卡正常运行后它已无事可做。
@@ -481,8 +484,8 @@ pnputil /enum-devices /class Display
 
 安装脚本不传这些参数，所以要么改默认值，要么改任务的参数。
 
-`eGPU-Notify.ps1`（23:50 提醒）有 `-Seconds`（窗口停留秒数，默认 5）、`-NoSound`，以及
-`-Title` / `-Body` 用于自定义文字。
+`eGPU-Notify.ps1`（23:50 提醒）有 `-Seconds`（窗口停留秒数，默认 5）、`-NoSound`、
+`-Always`（即使没接显卡也弹），以及 `-Title` / `-Body` 用于自定义文字。
 
 ## 排查
 

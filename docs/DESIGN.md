@@ -311,3 +311,27 @@ the job, while the fallback only matters if the watcher never started at all.
 
 Verified by reproducing the race deliberately — disable the device, then start both actors
 together — which produced the dedup branch and no false warning.
+
+## 17. A reminder must not contradict what actually happens
+
+With no dock attached the `23:55` task finds no device and does nothing. The `23:50` reminder
+used to appear regardless, announcing a disconnect that was not going to happen, and the log
+recorded the absence as `[ERROR]` — a red line on every such night, which is how a log stops
+being read.
+
+**Rules:**
+
+* The reminder is skipped when no matching eGPU is attached. This is the **default**, not an
+  opt-in flag, for two reasons: the scheduled task then needs no argument, and the behaviour
+  cannot be left half-applied by a task that was never re-registered. `-Always` overrides it.
+* "No device attached" is `[INFO]`, not `[ERROR]`. Exit code 2 still marks *not found* for
+  callers; only the log level changed.
+* The presence check is **delegated** to `eGPU-Guard.ps1 -Action Status` (exit 0 = present,
+  2 = absent) instead of being reimplemented in the reminder. One device-matching rule, in one
+  place: a second copy would drift the day `-MatchDescription` or `-MatchDeviceId` changed.
+* The check **fails open**. A missing helper script, an unexpected exit code or an exception
+  all end in the reminder being shown, because a cancelled reminder is a silently lost one.
+  Only an explicit "absent" skips it.
+
+All four branches are covered by an isolated test (a stub `eGPU-Guard.ps1` returning 2, 0, 1,
+and absent), so the fail-open behaviour is verified rather than assumed.

@@ -33,6 +33,22 @@ param(
     [int]$Seconds = 5,
 
     [switch]$NoSound,
+
+    # By default the reminder is SKIPPED when no matching eGPU is attached.
+    #
+    # Without this the window appears every night regardless, announcing a disconnect that is
+    # not going to happen: with no dock attached the 23:55 task finds no device and does
+    # nothing, so the reminder and the actual behaviour contradict each other.
+    #
+    # Skipping is the default rather than something the caller opts into, so the scheduled task
+    # needs no extra argument. That also means the behaviour cannot be left half-applied by an
+    # unregistered task. Pass -Always to force the window regardless.
+    #
+    # The presence check is DELEGATED to eGPU-Guard.ps1 -Action Status rather than reimplemented
+    # here. That keeps the device matching rule (-MatchDescription / -MatchDeviceId) in exactly
+    # one place; a second copy would silently drift the day those parameters change.
+    [switch]$Always,
+
     [string]$LogFile = "$env:ProgramData\eGPU-Guard\eGPU-Guard.log"
 )
 
@@ -68,6 +84,35 @@ function Start-ReminderSound {
         return 'system'
     } catch { }
     return 'none'
+}
+
+if (-not $Always) {
+    $base = $PSScriptRoot
+    if (-not $base -and $PSCommandPath) { $base = Split-Path -Parent $PSCommandPath }
+    $guard = if ($base) { Join-Path $base 'eGPU-Guard.ps1' } else { $null }
+
+    if (-not $guard -or -not (Test-Path -LiteralPath $guard)) {
+        # Fail OPEN: a missing helper must not silently cancel the reminder.
+        Write-Log -Level 'WARN' -Message 'cannot check for the eGPU (eGPU-Guard.ps1 not found) - showing the reminder anyway'
+    } else {
+        $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        # Double quotes are required: Windows strips " but not ', so a single-quoted path would
+        # be taken literally, apostrophes included, and the child would fail to start.
+        $argLine = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Action Status' -f $guard
+        $rc = $null
+        try {
+            $proc = Start-Process -FilePath $ps -WindowStyle Hidden -Wait -PassThru -ArgumentList $argLine
+            $rc = $proc.ExitCode
+        } catch {
+            Write-Log -Level 'WARN' -Message "device check failed ($($_.Exception.Message)) - showing the reminder anyway"
+        }
+        # eGPU-Guard.ps1 -Action Status: 0 = the eGPU is present, 2 = it is not.
+        # Any other outcome (crash, timeout, unexpected code) fails open as well.
+        if ($rc -eq 2) {
+            Write-Log -Message 'no eGPU attached - reminder skipped (pass -Always to show it anyway)'
+            exit 0
+        }
+    }
 }
 
 Write-Log -Message 'reminder starting'

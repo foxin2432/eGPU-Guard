@@ -415,7 +415,10 @@ function Exit-ActionLock {
 
 function Invoke-Disable {
     $gpu = Get-EGpuInstanceId | Select-Object -First 1
-    if (-not $gpu) { Write-Log "no $MatchDescription found in the PCI device tree" 'ERROR'; return 2 }
+    # No device is the normal situation when the dock is switched off, not a fault. Logging it
+    # as ERROR put a red line in the log on every such night, which is exactly how a log stops
+    # being read. Exit code 2 still marks "not found" for callers.
+    if (-not $gpu) { Write-Log "no eGPU attached (no $MatchDescription in the device tree) - nothing to disable"; return 2 }
 
     $state = Get-DeviceState $gpu.InstanceId
     if ($state.Disabled -or $state.Status -eq 'Disabled') {
@@ -475,7 +478,7 @@ function Invoke-Enable {
     # within the current boot session.
     Clear-StayDown
     $gpu = Get-EGpuInstanceId | Select-Object -First 1
-    if (-not $gpu) { Write-Log "no $MatchDescription in the device tree (dock off or not plugged)" 'WARN'; return 2 }
+    if (-not $gpu) { Write-Log "no eGPU attached (no $MatchDescription in the device tree) - nothing to enable"; return 2 }
 
     $state = Get-DeviceState $gpu.InstanceId
     if ($state.Status -eq 'Started') { Write-Log 'already started - nothing to do'; return 3 }

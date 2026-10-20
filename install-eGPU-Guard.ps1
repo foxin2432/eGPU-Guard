@@ -133,6 +133,9 @@ function New-GuardAction {
         -Argument ('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" {1}' -f $guardScript, $quoted)
 }
 
+# No extra argument needed: skipping the reminder when no eGPU is attached is the script's
+# default, so the deployed task needs no flag and the behaviour cannot be left half-applied by
+# an unregistered task. -Always forces the window regardless.
 $notifyAction = New-ScheduledTaskAction -Execute $psExe `
     -Argument ('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $notifyScript)
 # -Force is REQUIRED here. Without it the preflight sees the monitor that is attached to the
