@@ -174,7 +174,7 @@ the decision and its reason:
 
 ## How it works
 
-Three scripts, four tasks.
+Five scripts, four tasks.
 
 | Script | Role |
 |---|---|
@@ -210,6 +210,13 @@ opposite goals — one stops the GPU, the other exists to start it. Without coor
 watcher undoes the disconnect within seconds. `-StayDown` writes a marker recording the boot
 time it was created in, so it expires by itself on the next boot and a manual disable still
 gets recovered automatically.
+
+**Opting out is a date, not a switch you must remember to undo.** `-Action Pause` writes today's
+date, and the nightly run skips only on an exact match, deleting the marker when it is from
+another day — so one skipped night cannot quietly become a permanent one. A manual `Disable` is
+never blocked by it: `-StayDown`, which only the nightly task passes, is what separates "the
+schedule" from "an explicit request". `Off` disables the tasks rather than unregistering them,
+so `On` restores the schedule exactly.
 
 **Retries escalate: 5, 10, 20, 30, 60 s.** Not one flat 10-minute nap. A single failed attempt
 used to cost 600 s of sleeping while the GPU had long since become usable, which is what made
@@ -472,20 +479,24 @@ cd eGPU-Guard
 
 ## 工作原理
 
-三个脚本、四个任务。
+五个脚本、四个任务。
 
 | 脚本 | 职责 |
 |---|---|
 | `eGPU-Guard.ps1` | 全部动作，执行完即退出 |
 | `eGPU-Watch.ps1` | 开机时的辅助进程：把显卡启用后即退出 |
 | `eGPU-Notify.ps1` | 23:50 的提醒窗口（含提示音） |
+| `eGPU-Switch.ps1` / `.cmd` | 可选菜单，封装 `Pause` / `Unpause` / `Off` / `On` |
 
 | 任务 | 触发器 | 身份 |
 |---|---|---|
 | `eGPU-Guard-2350-Notify` | 每周 周日–周四 23:50 | 当前用户 |
 | `eGPU-Guard-2355-Disable` | 每周 周日–周四 23:55 | `SYSTEM` |
-| `eGPU-Guard-Boot-Enable` | 开机后 20 秒、登录后 5 秒 | `SYSTEM` |
-| `eGPU-Guard-Watch` | 开机后 10 秒、登录后 5 秒，常驻 | `SYSTEM` |
+| `eGPU-Guard-Boot-Enable` | 开机后 2 分钟、登录后 2 分钟 | `SYSTEM` |
+| `eGPU-Guard-Watch` | 开机后 3 秒、登录后 3 秒；显卡起来后即退出 | `SYSTEM` |
+
+兜底的 `Boot-Enable` 故意推到 2 分钟：看门狗从开机后 3 秒起就接管了这件事，兜底不能和它抢。
+它只在看门狗压根没启动时才有意义。
 
 ### 设计取舍
 
@@ -501,6 +512,11 @@ cd eGPU-Guard
 的天职就是把它启动起来。不做协调的话，看门狗会在几秒内把断开操作撤销。
 `-StayDown` 会写一个记录"创建时的开机时间"的标记，因此它会在下次开机时自动失效，
 而手动禁用仍然会被自动恢复。
+
+**"跳过"靠的是日期，不是需要你记得撤销的开关。** `-Action Pause` 只写今天的日期，夜间任务
+只在日期**完全相等**时跳过，日期不符就删掉标记——所以跳过一晚不可能悄悄变成永久不执行。
+手动 `Disable` 永远不受暂停影响：只有夜间任务会传 `-StayDown`，它正是"计划"和"明确指令"的
+分界线。`Off` 是禁用任务而不是删除任务，所以 `On` 能原样恢复。
 
 **重试间隔递进：5、10、20、30、60 秒。** 不是固定睡 10 分钟。以前一次失败就要等 600 秒，
 而显卡早就可用了——这正是"开机后连接很慢"的真正原因。
