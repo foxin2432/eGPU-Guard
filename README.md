@@ -82,6 +82,24 @@ Elevation is not optional: one task runs as `SYSTEM`, and Windows refuses to reg
 
 # Show what Windows currently thinks
 .\eGPU-Guard.ps1 -Action Status
+
+# Skip tonight's disconnect only (expires by itself at midnight, no admin needed)
+.\eGPU-Guard.ps1 -Action Pause
+.\eGPU-Guard.ps1 -Action Unpause
+
+# Stop / restart the whole schedule (asks for admin once; reversible)
+.\eGPU-Guard.ps1 -Action Off
+.\eGPU-Guard.ps1 -Action On
+```
+
+Or double-click `eGPU-Switch.cmd` for a menu with the same choices:
+
+```
+  1  Skip tonight only        (expires at midnight by itself)
+  2  Cancel the skip
+  3  Turn the whole schedule OFF
+  4  Turn the whole schedule ON
+  5  Show status
 ```
 
 ### Actions
@@ -93,6 +111,25 @@ Elevation is not optional: one task runs as `SYSTEM`, and Windows refuses to reg
 | `Resume` | Clears the stay-down window and enables the device — no reboot needed |
 | `Restart` | Removes the node and rescans. **Manual use only** — see below |
 | `Status` | Prints the device state, whether a monitor is attached, and why it is not restartable |
+| `Pause` | Skips **tonight's** scheduled disconnect. Needs no admin; expires at midnight |
+| `Unpause` | Cancels a pending skip |
+| `Off` | Disables every scheduled task. Needs admin, reversible |
+| `On` | Re-enables them |
+
+#### Why the pause expires by itself
+
+`Pause` writes today's date to `state\pause`. The nightly task compares it to *today's* date
+and skips only on a match, deleting the marker when it is from another day. A one-night skip
+therefore cannot quietly turn into a permanent one — the failure mode that would matter most
+here, because the machine would simply stop disconnecting and nothing would say so.
+
+A manual `-Action Disable` is **not** blocked by a pause: it is an explicit request. Only the
+scheduled run honours it, and `-StayDown` (passed by the nightly task and by nothing else) is
+what tells the two apart. The 23:50 reminder is skipped as well — announcing a disconnect that
+is not going to happen is exactly the contradiction the reminder check exists to prevent.
+
+`Off` disables the tasks instead of unregistering them, so every trigger and argument survives
+and `On` restores the schedule exactly as it was.
 
 ### Switches
 
@@ -112,6 +149,7 @@ Elevation is not optional: one task runs as `SYSTEM`, and Windows refuses to reg
 | 3 | Device already in the requested state |
 | 4 | Operation failed |
 | 5 | Refused by a safety check |
+| 6 | Needs administrator rights and the prompt was refused |
 
 ## Uninstall
 
@@ -143,13 +181,17 @@ Three scripts, four tasks.
 | `eGPU-Guard.ps1` | All actions. Runs and exits. |
 | `eGPU-Watch.ps1` | Boot-time helper: enables the device, then exits. |
 | `eGPU-Notify.ps1` | The 23:50 reminder window. |
+| `eGPU-Switch.ps1` / `.cmd` | Optional menu around `Pause` / `Unpause` / `Off` / `On`. |
 
 | Task | Trigger | Principal |
 |---|---|---|
 | `eGPU-Guard-2350-Notify` | Weekly, Sun–Thu 23:50 | interactive user |
 | `eGPU-Guard-2355-Disable` | Weekly, Sun–Thu 23:55 | `SYSTEM` |
-| `eGPU-Guard-Boot-Enable` | At boot +20 s, at logon +5 s | `SYSTEM` |
-| `eGPU-Guard-Watch` | At boot +10 s, at logon +5 s, resident | `SYSTEM` |
+| `eGPU-Guard-Boot-Enable` | At boot +2 min, at logon +2 min | `SYSTEM` |
+| `eGPU-Guard-Watch` | At boot +3 s, at logon +3 s; exits once the GPU is up | `SYSTEM` |
+
+`Boot-Enable` sits two minutes back on purpose: the watcher owns the job from boot+3 s, so the
+fallback must not compete with it. It only matters if the watcher never started at all.
 
 ### Design notes
 
@@ -351,7 +393,17 @@ cd eGPU-Guard
 
 # 查看 Windows 当前的状态判断
 .\eGPU-Guard.ps1 -Action Status
+
+# 只跳过今晚这次断开（到零点自动失效，无需管理员）
+.\eGPU-Guard.ps1 -Action Pause
+.\eGPU-Guard.ps1 -Action Unpause
+
+# 关闭 / 恢复整个计划（会请求一次管理员权限，可逆）
+.\eGPU-Guard.ps1 -Action Off
+.\eGPU-Guard.ps1 -Action On
 ```
+
+也可以直接双击 `eGPU-Switch.cmd`，用菜单选同样的操作。
 
 ### 动作
 
@@ -362,6 +414,22 @@ cd eGPU-Guard
 | `Resume` | 取消"保持断开"并立即启用显卡，**无需重启** |
 | `Restart` | 移除设备节点并重新扫描。**仅供人工使用**，原因见下 |
 | `Status` | 打印设备状态、是否接了显示器、以及为什么无法重启 |
+| `Pause` | 跳过**今晚**的定时断开，无需管理员，零点自动失效 |
+| `Unpause` | 取消尚未生效的跳过 |
+| `Off` | 禁用全部计划任务（需要管理员，可逆） |
+| `On` | 重新启用 |
+
+#### 为什么"暂停"会自动过期
+
+`Pause` 只是把**今天的日期**写进 `state\pause`。夜间任务拿它和"今天"比对，只有相等才跳过，
+日期不符就顺手删掉标记。所以"跳过一晚"不可能悄悄变成"永久不执行"——这恰恰是这里最要命的
+失败模式，因为机器会从此不再断开，而且没有任何提示。
+
+手动 `-Action Disable` **不受暂停影响**：那是明确的指令。只有定时任务会尊重暂停，而区分二者
+靠的是 `-StayDown`（只有夜间任务会传它）。23:50 的提醒也会一并跳过——提醒一件不会发生的事，
+正是前面专门修掉的那种自相矛盾。
+
+`Off` 是**禁用**任务而不是删除任务，所以所有触发器和参数都还在，`On` 能原样恢复。
 
 ### 开关
 
@@ -381,6 +449,7 @@ cd eGPU-Guard
 | 3 | 设备已是目标状态 |
 | 4 | 操作失败 |
 | 5 | 被安全检查拒绝 |
+| 6 | 需要管理员权限，但请求被拒绝 |
 
 ## 卸载
 

@@ -87,6 +87,22 @@ function Start-ReminderSound {
 }
 
 if (-not $Always) {
+    # Tonight's disconnect may have been skipped with `eGPU-Guard.ps1 -Action Pause`. Reminding
+    # about something that is not going to happen is the exact contradiction this check exists
+    # to prevent, so the pause marker is honoured here as well.
+    #
+    # Same file and same one-line date format as eGPU-Guard.ps1 (state\pause). If that format
+    # ever changes, both read sites must change together.
+    $pausePath = Join-Path (Split-Path -Parent $LogFile) 'state\pause'
+    if (Test-Path -LiteralPath $pausePath) {
+        $stamp = $null
+        try { $stamp = (Get-Content -LiteralPath $pausePath -Raw -ErrorAction Stop).Trim() } catch { }
+        if ($stamp -eq (Get-Date).ToString('yyyy-MM-dd')) {
+            Write-Log -Message 'tonight is paused (-Action Pause) - reminder skipped'
+            exit 0
+        }
+    }
+
     $base = $PSScriptRoot
     if (-not $base -and $PSCommandPath) { $base = Split-Path -Parent $PSCommandPath }
     $guard = if ($base) { Join-Path $base 'eGPU-Guard.ps1' } else { $null }

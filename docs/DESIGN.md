@@ -335,3 +335,35 @@ being read.
 
 All four branches are covered by an isolated test (a stub `eGPU-Guard.ps1` returning 2, 0, 1,
 and absent), so the fail-open behaviour is verified rather than assumed.
+
+## 18. Opting out must be easy, reversible, and self-expiring
+
+The only way to skip a night used to be to remember to do something before 23:55, so a switch
+was added: `-Action Pause` (one night), `-Action Off` (the whole schedule).
+
+**Rules:**
+
+* **Pause is keyed to a date, not to a boot and not to a file's existence.** The marker holds
+  `yyyy-MM-dd`; the nightly run skips only on an exact match and deletes the marker when it is
+  from another day. A one-night skip therefore cannot quietly become permanent — the failure
+  that would matter most, because the machine would stop disconnecting and nothing would say so.
+* **The pause must not block a manual `Disable`.** An explicit request outranks a schedule
+  setting. `-StayDown` is the discriminator, because the nightly task passes it and nothing else
+  does — no new argument, and therefore no re-registration, is needed to tell them apart.
+* **The reminder honours the pause too.** Announcing a disconnect that will not happen is the
+  same contradiction rule 17 exists to prevent.
+* **`Off` disables the tasks rather than unregistering them.** Every trigger and argument
+  survives, so `On` restores the previous schedule exactly; uninstalling remains a separate,
+  deliberately explicit act.
+* **Elevation is requested only for the action that needs it.** Pause, Unpause and Status work
+  unprivileged (the state directory is writable by users); Off and On re-launch just themselves
+  elevated and relay the exit code, which is why refusal surfaces as exit 6 instead of a
+  half-applied change.
+* **The menu holds no rules.** `eGPU-Switch.ps1` calls the same actions and reads the pause state
+  back from `-Action Status` instead of re-deriving the date, so the expiry rule lives in exactly
+  one place.
+
+Verified: pause → nightly `Disable -StayDown` returns 0 with the device untouched; the reminder
+stays silent; a yesterday/future-dated marker is ignored and removed; `Off`/`On` move all four
+tasks between `Disabled` and `Ready` and back; the non-elevated path self-elevates and relays
+exit 0.

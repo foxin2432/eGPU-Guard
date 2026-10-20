@@ -10,6 +10,11 @@
       -Action Resume    close the "stay down" window and start the eGPU now, without a reboot
       -Action Restart   remove + rescan, for Error 22/43 style states
       -Action Status    print current state, is a monitor attached, why it is not restartable
+      -Action Pause     skip TONIGHT's scheduled disconnect only (no admin needed; the marker
+                        expires by itself at midnight)
+      -Action Unpause   cancel a pending skip
+      -Action Off       disable every eGPU-Guard scheduled task (needs admin; reversible)
+      -Action On        re-enable them (needs admin)
 
     Common switches
       -Force            waive the "an external display is attached" warning (the separate
@@ -24,10 +29,11 @@
       3 device already in the requested state
       4 operation failed
       5 refused (safety checks, e.g. a display is attached and -Force was not given)
+      6 needs administrator rights but they were refused
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Disable', 'Enable', 'Resume', 'Restart', 'Status')]
+    [ValidateSet('Disable', 'Enable', 'Resume', 'Restart', 'Status', 'Pause', 'Unpause', 'Off', 'On')]
     [string]$Action = 'Status',
 
     [string]$LogFile = "$env:ProgramData\eGPU-Guard\eGPU-Guard.log",
@@ -96,6 +102,57 @@ function Clear-StayDown {
     if (Test-Path -LiteralPath $path) {
         Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
         Write-Log 'stay-down window closed'
+    }
+}
+
+function Get-PausePath {
+    # Shares the state directory with stay-down, but means something different: stay-down says
+    # "this boot was deliberately stopped", pause says "do not run TONIGHT's disconnect".
+    Join-Path (Split-Path -Parent $LogFile) 'state\pause'
+}
+
+function Test-Pause {
+    # True when tonight's scheduled disconnect was skipped with -Action Pause.
+    #
+    # Keyed to a DATE, never to a boot: it has to expire by itself, or a one-night skip quietly
+    # turns into a permanent one, which is the worst possible failure for this setting. A marker
+    # from any other day is stale, so it is ignored and removed.
+    $path = Get-PausePath
+    if (-not (Test-Path -LiteralPath $path)) { return $false }
+    $stamp = $null
+    try { $stamp = (Get-Content -LiteralPath $path -Raw -ErrorAction Stop).Trim() } catch { }
+    if ($stamp -ne (Get-Date).ToString('yyyy-MM-dd')) {
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+    return $true
+}
+
+function New-Pause {
+    $path = Get-PausePath
+    $dir = Split-Path -Parent $path
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    $today = (Get-Date).ToString('yyyy-MM-dd')
+    Set-Content -LiteralPath $path -Value $today -Encoding ascii -Force
+    Write-Log "tonight's disconnect is paused (marker for $today - it expires by itself at midnight)"
+}
+
+function Clear-Pause {
+    $path = Get-PausePath
+    if (Test-Path -LiteralPath $path) {
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        Write-Log 'pause cancelled - tonight runs as scheduled again'
+    } else {
+        Write-Log 'not paused - nothing to cancel'
+    }
+}
+
+function Test-Admin {
+    try {
+        $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+        return ([Security.Principal.WindowsPrincipal]$id).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch {
+        return $false
     }
 }
 
@@ -414,6 +471,14 @@ function Exit-ActionLock {
 }
 
 function Invoke-Disable {
+    # -StayDown is passed by the nightly task and by nothing else, so it is the precise marker
+    # for "this is the scheduled run". That is what lets -Action Pause skip the SCHEDULE without
+    # blocking a manual -Action Disable, which is an explicit request and must always be honoured.
+    if ($StayDown -and (Test-Pause)) {
+        Write-Log 'paused for today (-Action Pause) - skipping the scheduled disconnect'
+        return 0
+    }
+
     $gpu = Get-EGpuInstanceId | Select-Object -First 1
     # No device is the normal situation when the dock is switched off, not a fault. Logging it
     # as ERROR put a red line in the log on every such night, which is exactly how a log stops
@@ -566,9 +631,88 @@ function Invoke-Resume {
     Invoke-Enable
 }
 
+function Get-GuardTasks {
+    # Only useful from an elevated context: a non-elevated process cannot read the SYSTEM tasks
+    # at all (schtasks and Get-ScheduledTask both return "Access is denied"), so callers check
+    # Test-Admin first rather than mistaking "cannot read" for "does not exist".
+    @(Get-ScheduledTask -TaskName 'eGPU-Guard-*' -ErrorAction SilentlyContinue)
+}
+
+function Invoke-TasksPower {
+    # Turns the whole schedule off or back on. Reversible on purpose: this disables the tasks
+    # rather than unregistering them, so every trigger and argument survives for -Action On.
+    param([switch]$On)
+    $verb = if ($On) { 'On' } else { 'Off' }
+
+    if (-not (Test-Admin)) {
+        # Everything else in this script works without admin, so elevation is requested only
+        # here, and only to run this one action. The elevated child writes to the same log, so
+        # its own account of what happened is kept next to this line.
+        Write-Log "changing the tasks needs administrator rights - asking for elevation ($verb)"
+        $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        # Double quotes: Windows strips " but not ', so a single-quoted path arrives verbatim.
+        $argLine = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Action {1} -LogFile "{2}"' -f $PSCommandPath, $verb, $LogFile
+        try {
+            $p = Start-Process -FilePath $ps -Verb RunAs -Wait -PassThru -ArgumentList $argLine
+            return [int]$p.ExitCode
+        } catch {
+            Write-Log "elevation was refused or failed: $($_.Exception.Message)" 'ERROR'
+            return 6
+        }
+    }
+
+    $tasks = @(Get-GuardTasks)
+    if ($tasks.Count -eq 0) {
+        Write-Log 'no eGPU-Guard tasks found - nothing to change' 'ERROR'
+        return 2
+    }
+
+    $failed = 0
+    foreach ($t in $tasks) {
+        try {
+            if ($On) { $null = Enable-ScheduledTask -TaskName $t.TaskName -ErrorAction Stop }
+            else { $null = Disable-ScheduledTask -TaskName $t.TaskName -ErrorAction Stop }
+            Write-Log ("task {0} -> {1}" -f $t.TaskName, $(if ($On) { 'enabled' } else { 'disabled' }))
+        } catch {
+            Write-Log ("could not change {0}: {1}" -f $t.TaskName, $_.Exception.Message) 'ERROR'
+            $failed++
+        }
+    }
+    if ($failed -gt 0) { return 4 }
+    if ($On) { Write-Log 'all eGPU-Guard tasks are enabled again' }
+    else { Write-Log 'all eGPU-Guard tasks are disabled - nothing runs until -Action On' }
+    return 0
+}
+
+function Invoke-Pause {
+    if (Test-Pause) {
+        Write-Log 'already paused for today - nothing to do'
+        return 3
+    }
+    New-Pause
+    0
+}
+
+function Invoke-Unpause {
+    Clear-Pause
+    0
+}
+
 function Invoke-Status {
+    # Pause state is reported first: it needs no admin and it changes what tonight will do, so
+    # it must be visible even when no device is attached (which returns early below).
+    Write-Log "pausedTonight=$(Test-Pause)"
+
     $gpu = Get-EGpuInstanceId | Select-Object -First 1
-    if (-not $gpu) { Write-Log "no $MatchDescription found in the device tree" 'WARN'; return 2 }
+    if (-not $gpu) {
+        Write-Log "no $MatchDescription found in the device tree" 'WARN'
+        if (Test-Admin) {
+            foreach ($t in @(Get-GuardTasks)) { Write-Log ("task {0}: {1}" -f $t.TaskName, $t.State) }
+        } else {
+            Write-Log 'task state: needs administrator rights, not shown'
+        }
+        return 2
+    }
     $state = Get-DeviceState $gpu.InstanceId
     $mon = Get-AttachedMonitorOnEGpu
     Write-Log "instance=$($gpu.InstanceId)"
@@ -576,6 +720,12 @@ function Invoke-Status {
     Write-Log "externalMonitorDetected=$($mon.Attached) (source=$($mon.Source))"
     Write-Log "logfile=$LogFile"
     foreach ($a in @(Get-DisplayAdapters)) { Write-Log ("adapter: {0} [{1}] {2}" -f $a.Name, $a.Status, $a.InstanceId) }
+
+    if (Test-Admin) {
+        foreach ($t in @(Get-GuardTasks)) { Write-Log ("task {0}: {1}" -f $t.TaskName, $t.State) }
+    } else {
+        Write-Log 'task state: needs administrator rights, not shown'
+    }
     0
 }
 
@@ -590,6 +740,10 @@ switch ($Action) {
     'Resume'  { $code = Invoke-Resume }
     'Restart' { $code = Invoke-Restart }
     'Status'  { $code = Invoke-Status }
+    'Pause'   { $code = Invoke-Pause }
+    'Unpause' { $code = Invoke-Unpause }
+    'Off'     { $code = Invoke-TasksPower }
+    'On'      { $code = Invoke-TasksPower -On }
 }
 
 Write-Log "----- end (exit=$code) -----"
