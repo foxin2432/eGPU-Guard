@@ -27,7 +27,11 @@ if (-not (Test-Path -LiteralPath $guard)) {
 
 function Invoke-Guard {
     param([string]$Action)
-    & $ps -NoProfile -ExecutionPolicy Bypass -File $guard -Action $Action
+    # Out-Host, not a bare call: a native command's stdout becomes part of THIS function's
+    # output stream, so a caller that captures the return value ("$null = Invoke-Guard Status")
+    # would silently swallow everything the action printed. Out-Host writes straight to the
+    # console and leaves the exit code as the function's only pipeline output.
+    & $ps -NoProfile -ExecutionPolicy Bypass -File $guard -Action $Action | Out-Host
     return $LASTEXITCODE
 }
 
