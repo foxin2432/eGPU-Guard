@@ -367,3 +367,27 @@ Verified: pause → nightly `Disable -StayDown` returns 0 with the device untouc
 stays silent; a yesterday/future-dated marker is ignored and removed; `Off`/`On` move all four
 tasks between `Disabled` and `Ready` and back; the non-elevated path self-elevates and relays
 exit 0.
+
+## 19. Housekeeping on the cold path, never on the hot one
+
+The log grows by roughly 9 KB a day, so it is trimmed — but the check is deliberately not part of
+`Write-Log`.
+
+**Rules:**
+
+* **Checked once per process, at startup.** A stat per written line would tax the hot path to
+  save a few kilobytes a year. Every process re-checks at startup, and the guard runs daily, so
+  the file cannot outgrow the limit by more than one session's worth of lines.
+* **Trimmed by whole lines, never by bytes.** The log is one event per line; a byte cut leaves a
+  torn entry that no reader can parse.
+* **The rewrite is atomic.** `[IO.File]::Replace` on NTFS means a concurrent reader sees either
+  the whole old file or the whole new one — never a half-written log. `Move-Item -Force` is only
+  the fallback.
+* **A failed trim is a `WARN`, not a failure.** If the file is open elsewhere the trim is skipped
+  and the action still runs with its normal exit code: housekeeping must never break the job.
+* **The cut is self-describing.** The first line records how many lines were dropped, so a log
+  that starts mid-story explains itself instead of looking corrupted.
+
+Verified with a 4000-line file: the kept lines match the original tail byte for byte, a file
+below the threshold is untouched, `-MaxLogBytes 0` disables trimming, and a file held open
+exclusively produces `could not trim the log` with exit code 0 and no leftover `.trim` file.

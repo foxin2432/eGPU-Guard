@@ -172,6 +172,21 @@ the decision and its reason:
 2026-10-15 09:50:10 [INFO] Watch tunnel still coming up - waiting, node left intact
 ```
 
+The log trims itself. At startup — once per process, not once per line — a process checks the
+file size and, if it passed `-MaxLogBytes` (1 MB by default), rewrites it as a one-line header
+followed by the last `-KeepLogLines` entries (500 by default):
+
+```
+# log trimmed: kept the last 500 of 4213 lines (was 1102 KB)
+2026-10-23 09:52:46 [WARN] Watch still Unknown after 46s - needs a dock power cycle; node left intact
+```
+
+Trimmed by whole lines and never by bytes, because a byte cut would leave a torn entry. The
+rewrite is atomic on NTFS, so a reader running at the same moment sees either the whole old file
+or the whole new one. If the file cannot be replaced — it is open in another program, for
+instance — the trim is skipped with a `WARN` and the action still runs: housekeeping must never
+break the job. `-MaxLogBytes 0` disables trimming.
+
 ## How it works
 
 Five scripts, four tasks.
@@ -476,6 +491,19 @@ cd eGPU-Guard
 2026-10-15 09:50:10 [INFO] Watch state -> Disconnected [PCI\VEN_10DE&DEV_2783&...]
 2026-10-15 09:50:10 [INFO] Watch tunnel still coming up - waiting, node left intact
 ```
+
+日志会**自动裁剪**。每个进程启动时检查一次（不是每写一行检查一次），若超过 `-MaxLogBytes`
+（默认 1 MB），就重写为一行说明加最后 `-KeepLogLines` 条（默认 500）：
+
+```
+# log trimmed: kept the last 500 of 4213 lines (was 1102 KB)
+2026-10-23 09:52:46 [WARN] Watch still Unknown after 46s - needs a dock power cycle; node left intact
+```
+
+按**整行**裁剪，绝不按字节——按字节切会留下半条记录，读的人无法解析。重写用 NTFS 的原子替换，
+所以同时读日志的程序只会看到"完整的旧文件"或"完整的新文件"。如果文件无法替换（比如正被别的
+程序独占打开），裁剪会跳过并记一条 `WARN`，动作照常执行——清理绝不能拖累本职工作。
+`-MaxLogBytes 0` 可完全关闭裁剪。
 
 ## 工作原理
 

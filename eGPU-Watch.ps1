@@ -58,7 +58,13 @@ param(
 
     # Hard upper bound on the wait, so a dock that never appears (or a device stuck in a
     # Problem state, which no software action fixes) cannot leave a process resident forever.
-    [int]$IdleExitMinutes = 30
+    [int]$IdleExitMinutes = 30,
+
+    # Log housekeeping. Checked once per process at startup, so the cost is one stat per run
+    # rather than one per log line. 0 disables trimming; the file is otherwise bounded to the
+    # last KeepLogLines entries once it passes MaxLogBytes.
+    [int]$MaxLogBytes = 1048576,
+    [int]$KeepLogLines = 500
 )
 
 $ErrorActionPreference = 'Continue'
@@ -70,6 +76,44 @@ $StateDir = Join-Path $env:ProgramData 'eGPU-Guard'
 $LockDir = Join-Path $StateDir 'state'
 $LockPath = Join-Path $LockDir 'watch.lock'
 $ActionLockPath = Join-Path $LockDir 'action.lock'
+
+function Limit-LogFile {
+    # Keeps the log from growing without bound. Called ONCE per process, at startup, before the
+    # first line is written: checking on every write would put a stat call in the hot path to
+    # save a few kilobytes a year, and since every process re-checks at startup the file cannot
+    # outgrow the limit by more than one session's worth of lines.
+    #
+    # Trimming is by whole lines, never by bytes. The log is one event per line, so a byte cut
+    # would leave a torn entry that no reader could parse.
+    if ($MaxLogBytes -le 0) { return }              # 0 disables trimming entirely
+    if ($KeepLogLines -lt 1) { return }
+    try {
+        if (-not (Test-Path -LiteralPath $LogFile)) { return }
+        $size = (Get-Item -LiteralPath $LogFile -ErrorAction Stop).Length
+        if ($size -le $MaxLogBytes) { return }
+
+        $all = @(Get-Content -LiteralPath $LogFile -Encoding UTF8 -ErrorAction Stop)
+        $total = @($all).Count
+        if ($total -le $KeepLogLines) { return }
+        $keep = @(@($all)[($total - $KeepLogLines)..($total - 1)])
+
+        $tmp = "$LogFile.trim"
+        $header = '# log trimmed: kept the last {0} of {1} lines (was {2} KB)' -f $keep.Count, $total, [math]::Round($size / 1KB)
+        Set-Content -LiteralPath $tmp -Value (@($header) + $keep) -Encoding UTF8 -Force -ErrorAction Stop
+        try {
+            # Atomic on NTFS: a concurrent reader sees either the whole old file or the whole
+            # new one, never a half-written log.
+            [System.IO.File]::Replace($tmp, $LogFile, $null)
+        } catch {
+            Move-Item -LiteralPath $tmp -Destination $LogFile -Force -ErrorAction Stop
+        }
+        Write-Log ("log trimmed: kept the last {0} of {1} lines" -f $keep.Count, $total)
+    } catch {
+        # Housekeeping must never break an action: the log is diagnostics, not state.
+        Write-Log "could not trim the log: $($_.Exception.Message)" 'WARN'
+        Remove-Item -LiteralPath "$LogFile.trim" -Force -ErrorAction SilentlyContinue
+    }
+}
 
 function Write-Log {
     param([string]$Message, [string]$Level = 'INFO')
@@ -350,6 +394,7 @@ $script:CachedNode = $null
 $stayDownLogged = $false
 $script:stuckLogged = $false
 
+Limit-LogFile
 Write-Log "watcher started (pid=$PID interval=${IntervalSeconds}s idle=${IdleIntervalSeconds}s burst=${BurstSeconds}s retries=$StateRetries backoff=$($BackoffSeconds -join '/')s grace=${TransientGraceSeconds}s)"
 
 try {
