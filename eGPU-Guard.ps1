@@ -38,6 +38,7 @@ param(
 
     [string]$LogFile = "$env:ProgramData\eGPU-Guard\eGPU-Guard.log",
     [string]$MatchDescription = '4070 SUPER',
+    [string]$MatchVendorId = '10DE',
     [string]$MatchDeviceId = 'DEV_2783',
     [switch]$Force,
     [switch]$Toast,
@@ -55,8 +56,21 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
+
+# Every knob below can also live in eGPU-Guard.config.psd1, which is what the switch menu edits
+# and what an open-source user is expected to change. A parameter given on the command line wins,
+# because a one-off override must not rewrite shared configuration. Read before anything else
+# uses these values.
+. (Join-Path $PSScriptRoot 'eGPU-Config.ps1')
+$config = Get-GuardConfig
+if (-not $PSBoundParameters.ContainsKey('MatchDescription')) { $MatchDescription = $config.MatchDescription }
+if (-not $PSBoundParameters.ContainsKey('MatchVendorId')) { $MatchVendorId = $config.MatchVendorId }
+if (-not $PSBoundParameters.ContainsKey('MatchDeviceId')) { $MatchDeviceId = $config.MatchDeviceId }
+if (-not $PSBoundParameters.ContainsKey('MaxLogBytes')) { $MaxLogBytes = [int]$config.MaxLogBytes }
+if (-not $PSBoundParameters.ContainsKey('KeepLogLines')) { $KeepLogLines = [int]$config.KeepLogLines }
+
 # Child keys under ...\Enum\PCI are named "VEN_10DE&DEV_xxxx&..." (no leading "PCI\")
-$script:DeviceIdPrefix = "VEN_10DE&$MatchDeviceId&"
+$script:DeviceIdPrefix = "VEN_$MatchVendorId&$MatchDeviceId&"
 
 # ----------------------------------------------------------------- helpers ---
 
@@ -534,6 +548,19 @@ function Invoke-Disable {
         Write-Log "already disabled (ConfigFlags=0x$('{0:X}' -f $gpu.ConfigFlags)) - nothing to do"
         return 3
     }
+
+    # A device that is present but not Started is not providing display output, so there is
+    # nothing to switch off - and no output to lose. This is the normal case when the user has
+    # already stopped the GPU by hand after seeing the reminder, or the USB4 tunnel went down.
+    #
+    # Letting these through was the actual cause of 2026-10-22 23:55: the GPU had been
+    # disconnected by hand minutes earlier, so only the iGPU was active, the "only active display
+    # adapter" guard fired, and the log recorded an ERROR with exit 5 for a no-op.
+    if ($state.Status -ne 'Started') {
+        Write-Log "device is not started (status=$($state.Status)) - nothing to disable"
+        return 3
+    }
+
     if (-not (Test-Preflight -Force:$Force)) { return 5 }
     if (-not (Enter-ActionLock)) { Write-Log 'another recovery action is running - aborting' 'ERROR'; return 4 }
 

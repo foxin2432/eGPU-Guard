@@ -50,7 +50,7 @@ param(
 
     # Exit as soon as the device is up instead of staying resident forever.
     #
-    # Once the GPU is Started this process has nothing left to do: the 23:55 task performs the
+    # Once the GPU is Started this process has nothing left to do: the nightly task performs the
     # scheduled disconnect, and `-Action Enable` is available by hand. Staying resident only
     # costs a pnputil spawn per tick (measured: 0.083 % of a core, ~72 s of CPU per day, plus
     # process churn). Default ON, because idle cost with no benefit is wasted cost.
@@ -68,7 +68,14 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$DeviceKeyPrefix = 'VEN_10DE&DEV_2783&'
+
+# Device match and log limits come from eGPU-Guard.config.psd1 (the file the menu edits); an
+# explicit parameter still wins. Read before the prefix below is used to scan the device tree.
+. (Join-Path $PSScriptRoot 'eGPU-Config.ps1')
+$config = Get-GuardConfig
+if (-not $PSBoundParameters.ContainsKey('MaxLogBytes')) { $MaxLogBytes = [int]$config.MaxLogBytes }
+if (-not $PSBoundParameters.ContainsKey('KeepLogLines')) { $KeepLogLines = [int]$config.KeepLogLines }
+$DeviceKeyPrefix = "VEN_$($config.MatchVendorId)&$($config.MatchDeviceId)&"
 $PnpUtil = Join-Path $env:SystemRoot 'System32\pnputil.exe'
 $StateDir = Join-Path $env:ProgramData 'eGPU-Guard'
 # Lock files live in their own subdirectory so that a human or a diagnostic run can inspect
@@ -360,7 +367,7 @@ function Test-StayDown {
     # True while the eGPU was deliberately stopped in THIS boot session.
     #
     # This watcher's purpose is "not started -> start it", which is the exact opposite of what
-    # the 23:55 disconnect wants. Without this check the two fight: the scheduled Disable
+    # the nightly disconnect wants. Without this check the two fight: the scheduled Disable
     # succeeds and the watcher re-enables the GPU seconds later (observed on 2026-10-13 at
     # 23:55:02, undone in under 3 seconds, so the screen only flickered).
     #

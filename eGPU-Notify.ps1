@@ -24,7 +24,10 @@
 [CmdletBinding()]
 param(
     [string]$Title = 'eGPU Guard',
-    [string]$Body = '23:55 will stop the RTX 4070 SUPER. Save your work / close games now.',
+
+    # Left empty on purpose: the reminder text is built from the configured disconnect time and
+    # device name below, so it can never announce a time that differs from the task's.
+    [string]$Body = '',
     [string]$Hint = 'Click anywhere to dismiss - or leave it, it closes by itself.',
 
     # How long the window stays up before closing itself. Short on purpose: the reminder is
@@ -37,7 +40,7 @@ param(
     # By default the reminder is SKIPPED when no matching eGPU is attached.
     #
     # Without this the window appears every night regardless, announcing a disconnect that is
-    # not going to happen: with no dock attached the 23:55 task finds no device and does
+    # not going to happen: with no dock attached the nightly task finds no device and does
     # nothing, so the reminder and the actual behaviour contradict each other.
     #
     # Skipping is the default rather than something the caller opts into, so the scheduled task
@@ -53,6 +56,16 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
+
+# Reminder length, sound and wording come from eGPU-Guard.config.psd1, so changing the schedule
+# in one place changes what the reminder says. Values passed on the command line still win.
+. (Join-Path $PSScriptRoot 'eGPU-Config.ps1')
+$config = Get-GuardConfig
+if (-not $PSBoundParameters.ContainsKey('Seconds')) { $Seconds = [int]$config.NotifySeconds }
+if (-not $PSBoundParameters.ContainsKey('NoSound')) { $NoSound = -not [bool]$config.NotifySound }
+if (-not $PSBoundParameters.ContainsKey('Body')) {
+    $Body = '{0} will stop the {1}. Save your work / close games now.' -f $config.DisableTime, $config.MatchDescription
+}
 
 function Write-Log {
     param([string]$Level = 'INFO', [string]$Message)

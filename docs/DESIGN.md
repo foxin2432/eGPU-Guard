@@ -391,3 +391,44 @@ The log grows by roughly 9 KB a day, so it is trimmed — but the check is delib
 Verified with a 4000-line file: the kept lines match the original tail byte for byte, a file
 below the threshold is untouched, `-MaxLogBytes 0` disables trimming, and a file held open
 exclusively produces `could not trim the log` with exit code 0 and no leftover `.trim` file.
+
+## 20. One settings file, read at runtime
+
+Times, nights and the device match used to live in the defaults of five scripts plus the
+installer's parameter list. Retiming therefore meant either passing flags - which only affect the
+tasks registered by that one command, so the next install silently reverted them - or editing
+several files and hoping they stayed in step. They did not: the README and the registered tasks
+disagreed more than once during development.
+
+The decision is one file, `eGPU-Guard.config.psd1`, read at startup by every process that needs
+the values (guard, watcher, notifier, installer, switch menu). Precedence is command-line
+parameter, then file, then built-in default.
+
+  * **The defaults are deliberately duplicated in code.** The kit has to work when the file is
+    missing - someone cloning it and running the installer must get a working schedule, not a
+    warning. The file is a convenience, the code is the contract.
+  * **Validation falls back per key, not per file.** A single bad value reverts to its default and
+    is reported; everything the user got right still applies. A typo must never silently take the
+    schedule down, and must never take the rest of the settings with it.
+  * **The save is idempotent.** The shipped file is byte-for-byte what the writer produces, so
+    opening Settings and pressing Enter cannot produce a spurious diff. `Set-Content` appends its
+    own newline to a single value, which is why the writer uses `WriteAllText` with an explicit
+    encoding instead.
+  * **UTF-8 with BOM on purpose.** Windows PowerShell 5.1 reads a BOM-less file as ANSI, which
+    turns any non-ASCII a user types into mojibake.
+  * **Task names carry the time, and stale tasks are removed after registering the new ones.**
+    An `eGPU-Guard-2355-Disable` firing at 23:58 is a trap for whoever reads the task list next;
+    equally, renaming without cleaning up would make the disconnect run twice. Registering first
+    means a failed install cannot leave the machine with no working task at all.
+  * **The menu reads the file for its own labels** instead of hard-coding "23:58" into its
+    strings, which is how the label would have drifted from the schedule.
+  * **A closed stdin is not consent.** `Read-Host` returns `$null` when piped input runs out, and
+    `$null -match '^(n|no)$'` is false - so the "apply now?" prompt would have treated end of
+    input as "yes" and raised an admin prompt nobody asked for. `$null` now means no.
+
+Verified end-to-end by pointing the config at a bogus device name and time: `-Action Status`
+reported `no TESTCARD found in the device tree` and the reminder said
+`22:11 will stop the TESTCARD`, which is the cheapest possible proof that two separate processes
+are reading the same file. Invalid values (`24:00`, `Mon`, `2783`, a reminder later than the
+disconnect) are all rejected with a reason, and a corrupt file falls back to the defaults without
+throwing.

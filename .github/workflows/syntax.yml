@@ -78,3 +78,28 @@ jobs:
           }
           if ($bad -gt 0) { throw "$bad script(s) are not pure ASCII" }
           Write-Host 'all scripts are pure ASCII'
+
+      - name: Validate the shipped settings file
+        shell: powershell
+        run: |
+          # A broken eGPU-Guard.config.psd1 is only noticed at runtime, on a user's machine, so
+          # check it here with the same loader the scripts use: it must parse, pass every
+          # validation rule, and survive a save/reload round trip unchanged.
+          . .\eGPU-Config.ps1
+          $path = Join-Path (Get-Location) 'eGPU-Guard.config.psd1'
+          if (-not (Test-Path -LiteralPath $path)) { throw 'eGPU-Guard.config.psd1 is missing' }
+          $cfg = Get-GuardConfig -Path $path
+          $problems = @(Test-GuardConfig -Config $cfg)
+          if ($problems.Count -gt 0) {
+            $problems | ForEach-Object { Write-Host "FAIL $_" }
+            throw "$($problems.Count) invalid setting(s) in the shipped config"
+          }
+          $text = ConvertTo-GuardConfigText -Config $cfg
+          $shipped = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)
+          # Compare with newlines normalised: git may check the file out with LF depending on
+          # core.autocrlf, and that must not read as "the file needs reformatting".
+          $norm = { param($s) ($s -replace "`r`n", "`n") }
+          if ((& $norm $text) -ne (& $norm $shipped)) {
+            throw 'the shipped config is not what the writer produces - a Settings save would reformat it'
+          }
+          Write-Host "config OK: $($cfg.DisableTime) / $($cfg.NotifyTime) / $($cfg.Days -join ',')"

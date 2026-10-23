@@ -20,10 +20,10 @@ automatically afterwards — without having to remember to do either.
 
 `eGPU-Guard` registers a small set of Windows scheduled tasks that do exactly that:
 
-* **23:50** — a reminder window appears in the bottom-right corner with a sound, and closes
+* **23:53** — a reminder window appears in the bottom-right corner with a sound, and closes
   itself after a few seconds. It is skipped when no eGPU is attached, because there would be
   nothing to disconnect.
-* **23:55** — the eGPU is disabled cleanly (`pnputil /disable-device`), and the desktop moves
+* **23:58** — the eGPU is disabled cleanly (`pnputil /disable-device`), and the desktop moves
   to the integrated GPU.
 * **On every boot** — the eGPU is enabled automatically as early as Windows allows, and the
   watcher **exits as soon as it is running**. There is no permanent background process: once
@@ -57,16 +57,51 @@ cd eGPU-Guard
 Open an **elevated** PowerShell and register the tasks:
 
 ```powershell
-# Register with the defaults: 23:50 warning, 23:55 disable, Sunday-Thursday
 .\install-eGPU-Guard.ps1
-
-# Or pick your own times and nights
-.\install-eGPU-Guard.ps1 -NotifyTime 23:40 -DisableTime 23:45 `
-                         -Days Monday,Tuesday,Wednesday,Thursday,Friday
 ```
 
-Elevation is not optional: one task runs as `SYSTEM`, and Windows refuses to register a
-`SYSTEM` principal without administrator rights.
+That is the whole install: the defaults (23:53 reminder, 23:58 disconnect, Sunday-Thursday,
+RTX 4070 SUPER) come from `eGPU-Guard.config.psd1`. Elevation is not optional: three tasks run
+as `SYSTEM`, and Windows refuses to register a `SYSTEM` principal without administrator rights.
+
+## Settings
+
+Everything tunable lives in one file, `eGPU-Guard.config.psd1`, and the scripts read it at
+runtime. There is no second copy of these values in the code, so the installed schedule cannot
+disagree with what a script thinks the schedule is.
+
+```powershell
+@{
+    DisableTime      = '23:58'        # when the eGPU is disconnected
+    NotifyTime       = '23:53'        # when the reminder appears (must be earlier)
+    Days             = @('Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday')
+    MatchDescription = '4070 SUPER'   # part of the name Windows shows
+    MatchVendorId    = '10DE'         # PCI vendor id: 10DE NVIDIA, 1002 AMD, 8086 Intel
+    MatchDeviceId    = 'DEV_2783'     # the DEV_xxxx part of the hardware id
+    NotifySeconds    = 5              # how long the reminder stays on screen
+    NotifySound      = $true
+    MaxLogBytes      = 1048576        # trim the log past this size; 0 disables
+    KeepLogLines     = 500
+}
+```
+
+Two ways to change it:
+
+* **Edit the file**, then re-run `install-eGPU-Guard.ps1` (elevated) so the tasks pick the new
+  times up. Command-line flags still work and win over the file for that one run:
+  `.\install-eGPU-Guard.ps1 -DisableTime 22:30 -NotifyTime 22:25`.
+* **Use the menu**: double-click `eGPU-Switch.cmd`, choose `7  Settings`. It shows the current
+  values, validates what you type, writes the file, and offers to re-register the tasks for you
+  (one admin prompt).
+
+Validation is not cosmetic: a time is checked for `HH:mm` format, the reminder must be earlier
+than the disconnect, day names must be English, and the device ids must look like hex. Anything
+invalid is reported and the previous value is kept — a typo can never silently take the schedule
+down. A missing or unreadable file falls back to the built-in defaults.
+
+Task names carry the time they fire (`eGPU-Guard-2358-Disable`), and re-running the installer
+removes any `eGPU-Guard-*` task that is no longer part of the schedule. Retiming therefore cannot
+leave the old task behind to fire as well.
 
 ## Usage
 
@@ -100,7 +135,11 @@ Or double-click `eGPU-Switch.cmd` for a menu with the same choices:
   3  Turn the whole schedule OFF
   4  Turn the whole schedule ON
   5  Show status
+  7  Settings                 (times, nights, GPU match)
 ```
+
+The menu shows the real schedule ("Tonight: will run at 23:58 (...)") read from the config file,
+not a hard-coded string.
 
 ### Actions
 
@@ -125,7 +164,7 @@ here, because the machine would simply stop disconnecting and nothing would say 
 
 A manual `-Action Disable` is **not** blocked by a pause: it is an explicit request. Only the
 scheduled run honours it, and `-StayDown` (passed by the nightly task and by nothing else) is
-what tells the two apart. The 23:50 reminder is skipped as well — announcing a disconnect that
+what tells the two apart. The reminder is skipped as well — announcing a disconnect that
 is not going to happen is exactly the contradiction the reminder check exists to prevent.
 
 `Off` disables the tasks instead of unregistering them, so every trigger and argument survives
@@ -189,21 +228,26 @@ break the job. `-MaxLogBytes 0` disables trimming.
 
 ## How it works
 
-Five scripts, four tasks.
+Six scripts, one settings file, four tasks.
 
 | Script | Role |
 |---|---|
 | `eGPU-Guard.ps1` | All actions. Runs and exits. |
 | `eGPU-Watch.ps1` | Boot-time helper: enables the device, then exits. |
-| `eGPU-Notify.ps1` | The 23:50 reminder window. |
-| `eGPU-Switch.ps1` / `.cmd` | Optional menu around `Pause` / `Unpause` / `Off` / `On`. |
+| `eGPU-Notify.ps1` | The reminder window. |
+| `eGPU-Switch.ps1` / `.cmd` | Optional menu: skip / off / on / status, and the settings editor. |
+| `eGPU-Config.ps1` | Loads, validates and saves `eGPU-Guard.config.psd1`. |
+| `eGPU-Guard.config.psd1` | The settings: times, nights, device match, log limits. |
 
 | Task | Trigger | Principal |
 |---|---|---|
-| `eGPU-Guard-2350-Notify` | Weekly, Sun–Thu 23:50 | interactive user |
-| `eGPU-Guard-2355-Disable` | Weekly, Sun–Thu 23:55 | `SYSTEM` |
+| `eGPU-Guard-2353-Notify` | Weekly, Sun–Thu 23:53 | interactive user |
+| `eGPU-Guard-2358-Disable` | Weekly, Sun–Thu 23:58 | `SYSTEM` |
 | `eGPU-Guard-Boot-Enable` | At boot +2 min, at logon +2 min | `SYSTEM` |
 | `eGPU-Guard-Watch` | At boot +3 s, at logon +3 s; exits once the GPU is up | `SYSTEM` |
+
+Task names carry the time they fire, and the installer removes any `eGPU-Guard-*` task that is
+no longer part of the schedule — so retiming can never leave the old task behind to fire twice.
 
 `Boot-Enable` sits two minutes back on purpose: the watcher owns the job from boot+3 s, so the
 fallback must not compete with it. It only matters if the watcher never started at all.
@@ -241,6 +285,12 @@ reconnecting after a boot feel slow.
 are reused: a stale PID then blocks the watcher forever. An exclusive `FileShare.None` handle
 is released by the kernel when the process dies, so it can never go stale.
 
+**One settings file, read at runtime.** Times and the device match used to sit in the defaults of
+five scripts, so retiming meant flags that the next install silently reverted, or edits that had
+to stay in step by hand. Now `eGPU-Guard.config.psd1` is the only copy, every process reads it,
+and a bad value falls back alone with a reason instead of taking the schedule down. See
+[docs/DESIGN.md](docs/DESIGN.md) §20.
+
 **No child processes.** Every action is one in-process `pnputil` call. Spawning
 `powershell.exe` per attempt is what made boot feel heavy.
 
@@ -253,11 +303,15 @@ and falls back to a code-point table, so it works on an English or a Chinese Win
 
 ## Adapting to other hardware
 
-The matching defaults live in `eGPU-Guard.ps1` and are overridable:
+Set the three match values in `eGPU-Guard.config.psd1` — `MatchDescription`, `MatchVendorId` and
+`MatchDeviceId` — and every script follows, including the watcher, which used to keep its own
+hard-coded copy of the PCI prefix. Then re-run the installer once.
 
 ```powershell
-.\eGPU-Guard.ps1 -Action Status -MatchDescription 'RX 7900' -MatchDeviceId 'DEV_744C'
+.\eGPU-Guard.ps1 -Action Status -MatchDescription 'RX 7900' -MatchVendorId 1002 -MatchDeviceId 'DEV_744C'
 ```
+
+Command-line parameters exist too, for a one-off check; the file is what the scheduled tasks see.
 
 Find your own IDs with:
 
@@ -265,9 +319,10 @@ Find your own IDs with:
 pnputil /enum-devices /class Display
 ```
 
-`DEV_2783` is the RTX 4070 SUPER. `DEV_xxxx` is the PCI device ID of yours. Note that
-`eGPU-Watch.ps1` keeps its own copy of the match prefix (`$DeviceKeyPrefix`) because it is
-deliberately dependency-free — update it there too, or set the installer's defaults.
+`DEV_2783` is the RTX 4070 SUPER. `DEV_xxxx` is the PCI device ID of yours, and the vendor id is
+the `VEN_xxxx` part of the same hardware id (`10DE` NVIDIA, `1002` AMD, `8086` Intel). Only the
+device *node* is touched, so any GPU that Windows exposes the same way works; the guard does not
+assume NVIDIA except for the shipped defaults.
 
 ### Tuning the watcher
 
@@ -286,7 +341,7 @@ deliberately dependency-free — update it there too, or set the installer's def
 
 The installer passes none of these, so edit the defaults or change the task arguments.
 
-`eGPU-Notify.ps1` (the 23:50 reminder) takes `-Seconds` (how long the window stays up,
+`eGPU-Notify.ps1` (the nightly reminder) takes `-Seconds` (how long the window stays up,
 default 5), `-NoSound`, `-Always` (show it even when no eGPU is attached), and `-Title` /
 `-Body` for the text.
 
@@ -357,13 +412,14 @@ into these files has broken parsing before.
 
 `eGPU-Guard` 注册几个 Windows 计划任务来完成：
 
-* **23:50** — 右下角弹出提醒窗口并播放提示音，几秒后自动关闭。**没接显卡时不弹**，因为
+* **23:53** — 右下角弹出提醒窗口并播放提示音，几秒后自动关闭。**没接显卡时不弹**，因为
   那时并没有东西需要断开。
-* **23:55** — 用 `pnputil /disable-device` 干净地禁用外接显卡，桌面自动回到核显。
+* **23:58** — 用 `pnputil /disable-device` 干净地禁用外接显卡，桌面自动回到核显。
 * **每次开机** — 显卡已接上但未启动时，Windows 一允许就自动启用；**显卡起来后看门狗立即
   退出**，不留下常驻进程——显卡正常运行后它已无事可做。
 
-所有时间点都可通过参数修改，也可以随时关掉。它本质上是 `pnputil` 外面套了一层调度。
+所有时间点、星期和显卡匹配都集中在 `eGPU-Guard.config.psd1` 一个文件里，也可以随时关掉。
+它本质上是 `pnputil` 外面套了一层调度。
 
 ## 环境要求
 
@@ -390,16 +446,47 @@ cd eGPU-Guard
 用**管理员** PowerShell 注册计划任务：
 
 ```powershell
-# 使用默认值：23:50 提醒、23:55 断开、周日到周四
 .\install-eGPU-Guard.ps1
-
-# 或自定义时间和星期
-.\install-eGPU-Guard.ps1 -NotifyTime 23:40 -DisableTime 23:45 `
-                         -Days Monday,Tuesday,Wednesday,Thursday,Friday
 ```
 
-管理员权限是必需的：其中一个任务以 `SYSTEM` 身份运行，而 Windows 不允许非管理员注册
-`SYSTEM` 主体。
+这就是全部：默认值（23:53 提醒、23:58 断开、周日到周四、RTX 4070 SUPER）来自
+`eGPU-Guard.config.psd1`。管理员权限是必需的：其中三个任务以 `SYSTEM` 身份运行，而 Windows
+不允许非管理员注册 `SYSTEM` 主体。
+
+## 设置
+
+所有可调项都在 `eGPU-Guard.config.psd1` 一个文件里，各脚本运行时读取它。代码里不再保留第二
+份同样的数值，所以"实际注册的计划"和"脚本以为的计划"不可能对不上。
+
+```powershell
+@{
+    DisableTime      = '23:58'        # 断开显卡的时间
+    NotifyTime       = '23:53'        # 弹出提醒的时间（必须早于断开）
+    Days             = @('Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday')
+    MatchDescription = '4070 SUPER'   # Windows 显示的显卡名的一部分
+    MatchVendorId    = '10DE'         # PCI 厂商 ID：10DE 英伟达、1002 AMD、8086 英特尔
+    MatchDeviceId    = 'DEV_2783'     # 硬件 ID 里的 DEV_xxxx 部分
+    NotifySeconds    = 5              # 提醒窗口停留秒数
+    NotifySound      = $true
+    MaxLogBytes      = 1048576        # 日志超过这个大小就裁剪；0 表示不裁剪
+    KeepLogLines     = 500
+}
+```
+
+改法有两种：
+
+* **直接改文件**，然后用管理员 PowerShell 重跑一次 `install-eGPU-Guard.ps1`，让任务采用新
+  时间。命令行参数仍然可用，并且对那一次运行优先于文件：
+  `.\install-eGPU-Guard.ps1 -DisableTime 22:30 -NotifyTime 22:25`。
+* **用菜单**：双击 `eGPU-Switch.cmd`，选 `7  设置`。它会显示当前值、检查你输入的内容、写回
+  文件，并询问是否顺手重新注册任务（会弹一次管理员授权）。
+
+校验不是装样子：时间必须是 `HH:mm` 格式、提醒必须早于断开、星期必须用英文名、设备 ID 必须
+是十六进制形式。不合法的地方会报出来并保留原值——**打错一个字不可能悄悄让计划失效**。文件
+缺失或读不出来时回落到内置默认值。
+
+任务名里带的就是触发时间（`eGPU-Guard-2358-Disable`），重跑安装脚本会删掉不再属于当前计划
+的 `eGPU-Guard-*` 任务，所以改时间不会把旧任务留下来重复执行。
 
 ## 用法
 
@@ -448,7 +535,7 @@ cd eGPU-Guard
 失败模式，因为机器会从此不再断开，而且没有任何提示。
 
 手动 `-Action Disable` **不受暂停影响**：那是明确的指令。只有定时任务会尊重暂停，而区分二者
-靠的是 `-StayDown`（只有夜间任务会传它）。23:50 的提醒也会一并跳过——提醒一件不会发生的事，
+靠的是 `-StayDown`（只有夜间任务会传它）。提醒也会一并跳过——提醒一件不会发生的事，
 正是前面专门修掉的那种自相矛盾。
 
 `Off` 是**禁用**任务而不是删除任务，所以所有触发器和参数都还在，`On` 能原样恢复。
@@ -507,21 +594,26 @@ cd eGPU-Guard
 
 ## 工作原理
 
-五个脚本、四个任务。
+六个脚本、一个设置文件、四个任务。
 
 | 脚本 | 职责 |
 |---|---|
 | `eGPU-Guard.ps1` | 全部动作，执行完即退出 |
 | `eGPU-Watch.ps1` | 开机时的辅助进程：把显卡启用后即退出 |
-| `eGPU-Notify.ps1` | 23:50 的提醒窗口（含提示音） |
-| `eGPU-Switch.ps1` / `.cmd` | 可选菜单，封装 `Pause` / `Unpause` / `Off` / `On` |
+| `eGPU-Notify.ps1` | 提醒窗口（含提示音） |
+| `eGPU-Switch.ps1` / `.cmd` | 可选菜单：跳过 / 关闭 / 恢复 / 状态，以及设置编辑 |
+| `eGPU-Config.ps1` | 读取、校验、保存 `eGPU-Guard.config.psd1` |
+| `eGPU-Guard.config.psd1` | 设置：时间、星期、显卡匹配、日志上限 |
 
 | 任务 | 触发器 | 身份 |
 |---|---|---|
-| `eGPU-Guard-2350-Notify` | 每周 周日–周四 23:50 | 当前用户 |
-| `eGPU-Guard-2355-Disable` | 每周 周日–周四 23:55 | `SYSTEM` |
+| `eGPU-Guard-2353-Notify` | 每周 周日–周四 23:53 | 当前用户 |
+| `eGPU-Guard-2358-Disable` | 每周 周日–周四 23:58 | `SYSTEM` |
 | `eGPU-Guard-Boot-Enable` | 开机后 2 分钟、登录后 2 分钟 | `SYSTEM` |
 | `eGPU-Guard-Watch` | 开机后 3 秒、登录后 3 秒；显卡起来后即退出 | `SYSTEM` |
+
+任务名里带的就是触发时间，而安装脚本会删掉不再属于当前计划的 `eGPU-Guard-*` 任务——
+所以改时间不可能把旧任务留在系统里重复执行。
 
 兜底的 `Boot-Enable` 故意推到 2 分钟：看门狗从开机后 3 秒起就接管了这件事，兜底不能和它抢。
 它只在看门狗压根没启动时才有意义。
@@ -553,6 +645,11 @@ cd eGPU-Guard
 PID 会让看门狗永久无法启动。独占的 `FileShare.None` 句柄由内核在进程死亡时释放，
 不可能变陈旧。
 
+**设置只有一份，运行时读取。** 时间和显卡匹配以前散落在五个脚本的默认值里，改时间要么靠
+命令行参数（下次安装又悄悄覆盖回去），要么手工改多处还得保证一致。现在只有
+`eGPU-Guard.config.psd1` 一份，所有进程都读它；单个值不合法只回退那一项并说明原因，不会让
+整个计划失效。推导见 [docs/DESIGN.md](docs/DESIGN.md) 第 20 节。
+
 **不产生子进程。** 每个动作都是一次进程内的 `pnputil` 调用。每次尝试都启动一个
 `powershell.exe` 正是开机变卡的原因。
 
@@ -564,11 +661,14 @@ PID 会让看门狗永久无法启动。独占的 `FileShare.None` 句柄由内�
 
 ## 适配其他硬件
 
-匹配默认值在 `eGPU-Guard.ps1` 里，可以覆盖：
+在 `eGPU-Guard.config.psd1` 里改三项：`MatchDescription`、`MatchVendorId`、`MatchDeviceId`，
+所有脚本都会跟着变（包括以前自己藏了一份 PCI 前缀的看门狗），然后重跑一次安装脚本。
 
 ```powershell
-.\eGPU-Guard.ps1 -Action Status -MatchDescription 'RX 7900' -MatchDeviceId 'DEV_744C'
+.\eGPU-Guard.ps1 -Action Status -MatchDescription 'RX 7900' -MatchVendorId 1002 -MatchDeviceId 'DEV_744C'
 ```
+
+命令行参数也还在，用于一次性检查；定时任务看到的是文件。
 
 用下面的命令查你自己的 ID：
 
@@ -576,9 +676,9 @@ PID 会让看门狗永久无法启动。独占的 `FileShare.None` 句柄由内�
 pnputil /enum-devices /class Display
 ```
 
-`DEV_2783` 是 RTX 4070 SUPER。`DEV_xxxx` 换成你的 PCI 设备 ID。注意
-`eGPU-Watch.ps1` 为了不依赖其他脚本，**保留了自己的一份匹配前缀**
-（`$DeviceKeyPrefix`）——两处都要改，或者直接改安装脚本里的默认值。
+`DEV_2783` 是 RTX 4070 SUPER。`DEV_xxxx` 换成你的 PCI 设备 ID，厂商 ID 是同一个硬件 ID 里
+`VEN_xxxx` 的部分（英伟达 `10DE`、AMD `1002`、英特尔 `8086`）。程序只操作设备节点，凡是
+Windows 以同样方式暴露的显卡都能用——除了默认值以外，代码并不假设你是 NVIDIA。
 
 ### 调参
 
@@ -597,8 +697,9 @@ pnputil /enum-devices /class Display
 
 安装脚本不传这些参数，所以要么改默认值，要么改任务的参数。
 
-`eGPU-Notify.ps1`（23:50 提醒）有 `-Seconds`（窗口停留秒数，默认 5）、`-NoSound`、
-`-Always`（即使没接显卡也弹），以及 `-Title` / `-Body` 用于自定义文字。
+`eGPU-Notify.ps1`（夜间提醒）有 `-Seconds`（窗口停留秒数，默认 5）、`-NoSound`、
+`-Always`（即使没接显卡也弹），以及 `-Title` / `-Body` 用于自定义文字。提醒里的时间由安装
+脚本按 `-DisableTime` 自动写入 `-Body`，不会出现"提示说 23:55、实际 23:58"的错位。
 
 ## 排查
 
